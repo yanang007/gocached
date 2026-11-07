@@ -17,16 +17,20 @@ import (
 )
 
 // New returns the HTTP handler serving /cache/{actionID} from c.
-func New(c *chain.Chain) http.Handler {
+func New(c *chain.Chain, opts ...Option) http.Handler {
 	s := &server{chain: c}
+	for _, o := range opts {
+		o(s)
+	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /cache/{actionID}", s.get)
-	mux.HandleFunc("PUT /cache/{actionID}", s.put)
+	mux.Handle("GET /cache/{actionID}", s.auth(s.get))
+	mux.Handle("PUT /cache/{actionID}", s.auth(s.put))
 	return mux
 }
 
 type server struct {
 	chain *chain.Chain
+	token string // empty means no authentication
 }
 
 // parseID decodes a hex sha256 path or header value.

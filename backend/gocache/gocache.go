@@ -124,7 +124,7 @@ func (c *Cache) putOutput(obj backend.Object, body io.Reader) error {
 	if fi, err := os.Stat(target); err == nil && fi.Mode().IsRegular() && fi.Size() == obj.Size {
 		return nil // already present; content is named by its hash
 	}
-	return writeAtomic(target, func(w io.Writer) error {
+	return writeAtomic(target, false, func(w io.Writer) error {
 		h := sha256.New()
 		n, err := io.Copy(io.MultiWriter(w, h), body)
 		if err != nil {
@@ -146,7 +146,7 @@ func (c *Cache) putEntry(actionID []byte, obj backend.Object) error {
 		return nil // already records the same output
 	}
 	line := fmt.Sprintf("v1 %x %x %20d %20d\n", actionID, obj.OutputID, obj.Size, time.Now().UnixNano())
-	return writeAtomic(target, func(w io.Writer) error {
+	return writeAtomic(target, true, func(w io.Writer) error {
 		_, err := io.WriteString(w, line)
 		return err
 	})
@@ -191,7 +191,12 @@ func readEntry(name string, actionID []byte) (backend.Object, error) {
 // writeAtomic writes target via a temp file in the same directory and a
 // rename, so readers never see a partial file. If the rename fails because a
 // concurrent writer already produced target, that writer's file is kept.
-func writeAtomic(target string, fill func(io.Writer) error) error {
+//
+// With replace false (content-addressed outputs), an existing target is never
+// replaced: on Windows, replacing a file makes concurrent opens of it fail
+// with a sharing violation, which would break in-flight uploads of the same
+// output. The temp file is hard-linked into place instead of renamed.
+func writeAtomic(target string, replace bool, fill func(io.Writer) error) error {
 	dir := filepath.Dir(target)
 	if err := os.MkdirAll(dir, 0o777); err != nil {
 		return err
@@ -208,6 +213,16 @@ func writeAtomic(target string, fill func(io.Writer) error) error {
 	if err == nil {
 		// CreateTemp uses 0600; go's own cache files are 0666 (minus umask).
 		err = os.Chmod(tmpName, 0o666)
+	}
+	if err == nil && !replace {
+		// Link fails atomically if target exists, so a concurrent writer's
+		// file is never replaced under an open reader.
+		lerr := os.Link(tmpName, target)
+		if _, serr := os.Stat(target); lerr == nil || serr == nil {
+			os.Remove(tmpName)
+			return nil
+		}
+		// Hard links unsupported here (e.g. FAT); fall back to rename.
 	}
 	if err == nil {
 		err = os.Rename(tmpName, target)

@@ -8,17 +8,19 @@
 //	GOCACHED_DIR    local cache directory (default: <user cache dir>/gocached)
 //	GOCACHED_URL    gocached server base URL; unset means local disk only
 //	GOCACHED_QUIET  set to 1 to silence the stats line printed on close
+//	GOCACHED_TOKEN  shared token sent as "Authorization: Bearer <token>"
 //
 // Environment for serve:
 //
 //	GOCACHED_CACHE_DIR  cache directory to serve (required)
 //	GOCACHED_ADDR       listen address (default: :8080)
+//	GOCACHED_TOKEN      if set, /cache/* requires "Authorization: Bearer <token>"
 //	GOCACHED_METRICS_PULL   set to 1 to serve Prometheus metrics on /metrics
 //	GOCACHED_PUSHGATEWAY    Pushgateway URL; set to push metrics periodically
 //	GOCACHED_PUSH_INTERVAL  push period (default: 15s)
 //
-// /healthz is always served. With neither metrics mode set, no metrics are
-// collected.
+// /healthz is always served and, like /metrics, needs no token. With neither
+// metrics mode set, no metrics are collected.
 package main
 
 import (
@@ -27,6 +29,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 
@@ -77,7 +80,8 @@ func runProg() error {
 	}
 	var rest []backend.Backend
 	if url := os.Getenv("GOCACHED_URL"); url != "" {
-		rest = append(rest, remote.New(url, nil))
+		client := &http.Client{Transport: remote.BearerTransport(os.Getenv("GOCACHED_TOKEN"), nil)}
+		rest = append(rest, remote.New(url, client))
 	}
 	return prog.Run(context.Background(), os.Stdin, os.Stdout, os.Stderr, prog.Options{
 		Chain: chain.New(cache, rest...),
@@ -107,6 +111,10 @@ func runServe() error {
 	if err != nil {
 		return err
 	}
+	token := os.Getenv("GOCACHED_TOKEN")
+	if token == "" {
+		log.Printf("gocached: WARNING: GOCACHED_TOKEN is not set; /cache/* accepts unauthenticated reads and writes")
+	}
 	log.Printf("gocached: serving %s, listening on http://%s", cache.Dir(), ln.Addr())
-	return serveWithMetrics(ln, server.New(chain.New(cache)))
+	return serveWithMetrics(ln, server.New(chain.New(cache), server.WithToken(token)))
 }
