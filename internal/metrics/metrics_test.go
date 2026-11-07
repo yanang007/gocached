@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -121,6 +125,72 @@ func TestPullServesMetrics(t *testing.T) {
 		t.Fatalf("/metrics status = %d", resp.StatusCode)
 	}
 	assertContains(t, body, wantSeries)
+}
+
+func TestLocalWriteFailureIs500AndNotAVerifyFailure(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := gocache.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, stop := metrics.Start(metrics.Config{Pull: true}, server.New(chain.New(cache)))
+	srv := httptest.NewServer(h)
+	t.Cleanup(func() { srv.Close(); stop() })
+
+	// A regular file where the output's shard directory belongs makes the
+	// write fail on the server side, like a full disk or a permission error.
+	out := sumHex("valid body")
+	if err := os.WriteFile(filepath.Join(dir, out[:2]), nil, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	resp, _ := do(t, http.MethodPut, srv.URL+"/cache/"+actionID("io"),
+		map[string]string{remote.HeaderOutputID: out}, "valid body")
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("put status = %d, want 500", resp.StatusCode)
+	}
+	// A malformed output ID is a client error, but not a verification failure.
+	resp, _ = do(t, http.MethodPut, srv.URL+"/cache/"+actionID("bad"),
+		map[string]string{remote.HeaderOutputID: "zz"}, "body")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("bad header put status = %d, want 400", resp.StatusCode)
+	}
+
+	_, body := do(t, http.MethodGet, srv.URL+"/metrics", nil, "")
+	assertContains(t, body, []string{
+		`gocached_requests_total{op="put",result="error"} 1`,
+		`gocached_requests_total{op="put",result="rejected"} 1`,
+		`gocached_verify_failures_total 0`,
+	})
+}
+
+func TestBrokenUploadIsRejectedButNotAVerifyFailure(t *testing.T) {
+	srv := startServer(t, metrics.Config{Pull: true})
+
+	// Promise 100 bytes, send 4, then hang up.
+	conn, err := net.Dial("tcp", strings.TrimPrefix(srv.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintf(conn, "PUT /cache/%s HTTP/1.1\r\nHost: x\r\n%s: %s\r\nContent-Length: 100\r\n\r\nabcd",
+		actionID("cut"), remote.HeaderOutputID, sumHex("whatever"))
+	conn.(*net.TCPConn).CloseWrite()
+	io.Copy(io.Discard, conn) // wait for the server to finish the request
+	conn.Close()
+
+	// The handler may still be recording after the connection closed.
+	want := []string{
+		`gocached_requests_total{op="put",result="rejected"} 1`,
+		`gocached_verify_failures_total 0`,
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, body := do(t, http.MethodGet, srv.URL+"/metrics", nil, "")
+		if strings.Contains(body, want[0]) || time.Now().After(deadline) {
+			assertContains(t, body, want)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func TestPullDisabledMetricsIs404(t *testing.T) {

@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -32,6 +33,16 @@ const (
 	// mtimeInterval matches go: mtime is refreshed on use at most this often,
 	// which keeps go's trim from deleting entries that are still in use.
 	mtimeInterval = time.Hour
+)
+
+// Errors from Put that are the caller's fault rather than local I/O
+// failures. Put wraps them, so test with errors.Is.
+var (
+	// ErrInvalidID reports an action or output ID of the wrong length.
+	ErrInvalidID = errors.New("gocache: invalid id length")
+	// ErrVerify reports a body whose size or sha256 does not match the
+	// object it claims to be. Nothing is stored.
+	ErrVerify = errors.New("gocache: body does not match object")
 )
 
 // Cache is a backend.Backend over a GOCACHE-format directory.
@@ -111,7 +122,7 @@ func (c *Cache) Put(ctx context.Context, actionID []byte, obj backend.Object, bo
 		return err
 	}
 	if len(actionID) != hashSize || len(obj.OutputID) != hashSize {
-		return fmt.Errorf("gocache: invalid id length")
+		return ErrInvalidID
 	}
 	if err := c.putOutput(obj, body); err != nil {
 		return err
@@ -131,10 +142,10 @@ func (c *Cache) putOutput(obj backend.Object, body io.Reader) error {
 			return err
 		}
 		if n != obj.Size {
-			return fmt.Errorf("gocache: body size %d, want %d", n, obj.Size)
+			return fmt.Errorf("%w: body size %d, want %d", ErrVerify, n, obj.Size)
 		}
 		if !bytes.Equal(h.Sum(nil), obj.OutputID) {
-			return fmt.Errorf("gocache: body sha256 does not match output ID %x", obj.OutputID)
+			return fmt.Errorf("%w: body sha256 does not match output ID %x", ErrVerify, obj.OutputID)
 		}
 		return nil
 	})

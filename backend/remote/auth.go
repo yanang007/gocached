@@ -1,6 +1,10 @@
 package remote
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/yanang007/gocached/internal/bearer"
+)
 
 // BearerTransport returns a RoundTripper that sends
 // "Authorization: Bearer <token>" on every request via base (nil means
@@ -12,17 +16,17 @@ func BearerTransport(token string, base http.RoundTripper) http.RoundTripper {
 	if token == "" {
 		return base
 	}
-	return &bearer{token: "Bearer " + token, base: base}
+	return &bearerTransport{value: bearer.Value(token), base: base}
 }
 
-type bearer struct {
-	token string
+type bearerTransport struct {
+	value string
 	base  http.RoundTripper
 }
 
-func (b *bearer) RoundTrip(req *http.Request) (*http.Response, error) {
+func (b *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// RoundTrippers must not modify the caller's request.
 	req = req.Clone(req.Context())
-	req.Header.Set("Authorization", b.token)
+	req.Header.Set(bearer.Header, b.value)
 	return b.base.RoundTrip(req)
 }

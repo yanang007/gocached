@@ -117,26 +117,44 @@ func TestLocalDiskSecondBuildHitsEverything(t *testing.T) {
 	}
 }
 
+// gocacheDir returns a fresh directory that serve accepts as a GOCACHE: it
+// holds the README go writes when it initializes a cache dir.
+func gocacheDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "README"), []byte("test cache\n"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // startServer runs `gocached serve` on a free port backed by a fresh cache
 // dir and returns its base URL. The server is killed when the test ends.
 func startServer(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	// serve requires the README go writes when it initializes a GOCACHE.
-	if err := os.WriteFile(filepath.Join(dir, "README"), []byte("test cache\n"), 0o666); err != nil {
-		t.Fatal(err)
-	}
-	return startServerAt(t, dir)
+	return startServerAt(t, gocacheDir(t))
 }
 
 // startServerAt runs `gocached serve` over an existing GOCACHE dir.
 func startServerAt(t *testing.T, dir string) string {
 	t.Helper()
+	url, _ := runServe(t, dir)
+	return url
+}
+
+// runServe runs `gocached serve` over dir on a free port, without a token
+// unless extraEnv sets one. It returns the base URL and the log lines printed
+// up to and including the "listening on" line. The server is killed when the
+// test ends.
+func runServe(t *testing.T, dir string, extraEnv ...string) (url, startupLog string) {
+	t.Helper()
 	cmd := exec.Command(gocachedBin, "serve")
 	cmd.Env = append(os.Environ(),
 		"GOCACHED_CACHE_DIR="+dir,
 		"GOCACHED_ADDR=127.0.0.1:0",
+		"GOCACHED_TOKEN=",
 	)
+	cmd.Env = append(cmd.Env, extraEnv...)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -148,24 +166,27 @@ func startServerAt(t *testing.T, dir string) string {
 		cmd.Process.Kill()
 		cmd.Wait()
 	})
-	urlCh := make(chan string, 1)
+	type result struct{ url, log string }
+	ch := make(chan result, 1)
 	go func() {
 		listening := regexp.MustCompile(`listening on (http://\S+)`)
+		var log strings.Builder
 		sc := bufio.NewScanner(stderr)
 		for sc.Scan() {
+			log.WriteString(sc.Text() + "\n")
 			if m := listening.FindStringSubmatch(sc.Text()); m != nil {
-				urlCh <- m[1]
+				ch <- result{m[1], log.String()}
 				break
 			}
 		}
 		io.Copy(io.Discard, stderr) // keep draining so the server never blocks
 	}()
 	select {
-	case u := <-urlCh:
-		return u
+	case r := <-ch:
+		return r.url, r.log
 	case <-time.After(10 * time.Second):
 		t.Fatal("server did not report its listen address")
-		return ""
+		return "", ""
 	}
 }
 
@@ -423,10 +444,7 @@ func TestClientHitsCacheWarmedByHostGo(t *testing.T) {
 }
 
 func TestHostGoHitsObjectsUploadedByClient(t *testing.T) {
-	hostCache := t.TempDir()
-	if err := os.WriteFile(filepath.Join(hostCache, "README"), []byte("test cache\n"), 0o666); err != nil {
-		t.Fatal(err)
-	}
+	hostCache := gocacheDir(t)
 	url := startServerAt(t, hostCache)
 	out := filepath.Join(t.TempDir(), "out")
 
@@ -439,6 +457,46 @@ func TestHostGoHitsObjectsUploadedByClient(t *testing.T) {
 	trace := plainGoBuild(t, hostCache, out, "-x")
 	if regexp.MustCompile(`(?m)[/\\]compile(\.exe)?["\s]`).MatchString(trace) {
 		t.Fatalf("host go recompiled despite uploaded objects:\n%s", trace)
+	}
+}
+
+// runFailing runs gocached with args and env, expecting it to exit with an
+// error within 10s, and returns its combined output.
+func runFailing(t *testing.T, args []string, env ...string) string {
+	t.Helper()
+	cmd := exec.Command(gocachedBin, args...)
+	cmd.Env = append(os.Environ(), env...)
+	cmd.Stdin = strings.NewReader("") // prog would otherwise wait on stdin
+	var out []byte
+	var err error
+	done := make(chan struct{})
+	go func() { out, err = cmd.CombinedOutput(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		cmd.Process.Kill()
+		<-done
+		t.Fatalf("gocached %v kept running", args)
+	}
+	if err == nil {
+		t.Fatalf("gocached %v succeeded, want a startup failure; output:\n%s", args, out)
+	}
+	return string(out)
+}
+
+func TestInvalidDurationsFailFast(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		env  []string
+		name string
+	}{
+		{[]string{"prog"}, []string{"GOCACHED_DIR=" + t.TempDir(), "GOCACHED_URL=http://127.0.0.1:1", "GOCACHED_TIMEOUT=soon"}, "GOCACHED_TIMEOUT"},
+		{[]string{"prog"}, []string{"GOCACHED_DIR=" + t.TempDir(), "GOCACHED_DRAIN_TIMEOUT=-1s"}, "GOCACHED_DRAIN_TIMEOUT"},
+		{[]string{"serve"}, []string{"GOCACHED_CACHE_DIR=" + gocacheDir(t), "GOCACHED_ADDR=127.0.0.1:0", "GOCACHED_PUSH_INTERVAL=0"}, "GOCACHED_PUSH_INTERVAL"},
+	} {
+		if out := runFailing(t, tc.args, tc.env...); !strings.Contains(out, tc.name) {
+			t.Errorf("gocached %v with a bad %s: output does not name it:\n%s", tc.args, tc.name, out)
+		}
 	}
 }
 

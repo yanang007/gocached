@@ -4,14 +4,18 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
 
 	"github.com/yanang007/gocached/backend"
+	"github.com/yanang007/gocached/backend/gocache"
 	"github.com/yanang007/gocached/backend/remote"
 	"github.com/yanang007/gocached/chain"
 )
@@ -89,11 +93,23 @@ func (s *server) put(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	obj := backend.Object{OutputID: outputID, Size: r.ContentLength}
-	path, err := s.chain.Put(r.Context(), actionID, obj, r.Body)
+	body := &errBody{r: r.Body}
+	path, err := s.chain.Put(r.Context(), actionID, obj, body)
 	if path == "" {
-		// The local write verifies size and sha256 against the output ID and
-		// leaves nothing behind on failure.
-		http.Error(w, "rejected: "+err.Error(), http.StatusBadRequest)
+		// The local write leaves nothing behind on failure.
+		switch {
+		case errors.Is(err, gocache.ErrVerify) && body.err == nil:
+			reportVerifyFailure(r.Context())
+			http.Error(w, "rejected: "+err.Error(), http.StatusBadRequest)
+		case errors.Is(err, gocache.ErrInvalidID):
+			http.Error(w, "rejected: "+err.Error(), http.StatusBadRequest)
+		case body.err != nil:
+			// The client's upload broke off; nothing wrong on our side.
+			http.Error(w, "reading body: "+body.err.Error(), http.StatusBadRequest)
+		default:
+			log.Printf("gocached: put %x: %v", actionID, err)
+			http.Error(w, "storing object failed", http.StatusInternalServerError)
+		}
 		return
 	}
 	if err != nil {
@@ -102,4 +118,35 @@ func (s *server) put(w http.ResponseWriter, r *http.Request) {
 		log.Printf("gocached: put %x: %v", actionID, err)
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type verifyHookKey struct{}
+
+// OnVerifyFailure returns a copy of ctx that makes the handler call f when a
+// PUT carried by a request with that context is rejected because its body
+// does not match its size or output ID. Other rejections and server errors
+// do not call f.
+func OnVerifyFailure(ctx context.Context, f func()) context.Context {
+	return context.WithValue(ctx, verifyHookKey{}, f)
+}
+
+func reportVerifyFailure(ctx context.Context) {
+	if f, ok := ctx.Value(verifyHookKey{}).(func()); ok {
+		f()
+	}
+}
+
+// errBody remembers the first read error other than io.EOF, which tells a
+// broken upload apart from a local write failure.
+type errBody struct {
+	r   io.Reader
+	err error
+}
+
+func (b *errBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if err != nil && err != io.EOF && b.err == nil {
+		b.err = err
+	}
+	return n, err
 }

@@ -67,15 +67,18 @@ gocached: get=812 hit_local=3 hit_remote=790 miss=19 put=19 upload_ok=19 upload_
 | `GOCACHED_DIR`     | `<user cache dir>/gocached`   | Local cache directory, created if missing. `<user cache dir>` is `$XDG_CACHE_HOME` or `~/.cache` on Linux. |
 | `GOCACHED_URL`     | unset                         | Server base URL. Unset means local disk only. |
 | `GOCACHED_TOKEN`   | unset                         | Shared token, sent as `Authorization: Bearer <token>`. |
-| `GOCACHED_TIMEOUT` | `2s`                          | Remote get timeout, a Go duration (`500ms`) or plain seconds (`1.5`). |
+| `GOCACHED_TIMEOUT` | `2s`                          | Remote get timeout: how long to wait for the server's response headers. Reading the body is bounded separately (30s). |
+| `GOCACHED_DRAIN_TIMEOUT` | `60s`                   | How long the client waits for pending uploads when the go command ends. |
 | `GOCACHED_QUIET`   | unset                         | Set to `1` to silence the stats line. |
+
+Durations are a Go duration (`500ms`, `1m`) or plain seconds (`1.5`). An invalid or non-positive duration makes `gocached` exit with an error at startup instead of falling back to the default.
 
 ### Behavior when the server is slow or down
 
-- **Lookups:** a remote get that fails or exceeds `GOCACHED_TIMEOUT` counts as a miss, and go compiles the object itself. After 3 consecutive remote failures, the client skips the server for the rest of that go command. The next go command starts a new client and tries again.
+- **Lookups:** a remote get that fails, or whose response does not start within `GOCACHED_TIMEOUT`, counts as a miss, and go compiles the object itself. After 3 consecutive remote failures, the client skips the server for the rest of that go command. The next go command starts a new client and tries again.
 - **Verification:** downloads are checked against their sha256 output ID. A corrupted object counts as a miss.
 - **Uploads:** objects go compiles are written to the local directory first and go continues at once. Uploads run in the background, at most 4 at a time, each limited to 30s. When 4 are in flight, the next one waits for a free slot. A failed upload is counted in `upload_fail` and never fails the build.
-- **End of the go command:** the client waits up to 60s for pending uploads (`drain=` in the stats line), then drops whatever is left.
+- **End of the go command:** the client waits up to `GOCACHED_DRAIN_TIMEOUT` (60s) for pending uploads (`drain=` in the stats line), then drops whatever is left.
 
 ## Server
 
@@ -114,7 +117,7 @@ The server does not terminate TLS. Put it behind a reverse proxy if traffic need
 
 ### Endpoints
 
-- `GET /cache/{actionID}` and `PUT /cache/{actionID}`: the cache API (token-protected when `GOCACHED_TOKEN` is set). Uploads whose content does not match their output ID are rejected with `400`.
+- `GET /cache/{actionID}` and `PUT /cache/{actionID}`: the cache API (token-protected when `GOCACHED_TOKEN` is set). Uploads whose content does not match their output ID, or with malformed IDs or headers, are rejected with `400`; a server-side write failure (disk full, permissions) returns `500`.
 - `GET /healthz`: liveness, no token.
 - `GET /metrics`: Prometheus metrics when `GOCACHED_METRICS_PULL=1`, no token.
 

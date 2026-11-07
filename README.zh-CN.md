@@ -67,15 +67,18 @@ gocached: get=812 hit_local=3 hit_remote=790 miss=19 put=19 upload_ok=19 upload_
 | `GOCACHED_DIR`           | `<用户缓存目录>/gocached`   | 本地缓存目录，不存在时自动创建。Linux 上 `<用户缓存目录>` 是 `$XDG_CACHE_HOME` 或 `~/.cache`。 |
 | `GOCACHED_URL`           | 未设置                      | 服务端地址。未设置时只使用本地磁盘。 |
 | `GOCACHED_TOKEN`         | 未设置                      | 共享 token，以 `Authorization: Bearer <token>` 发送。 |
-| `GOCACHED_TIMEOUT`       | `2s`                        | 远端 get 超时，可写成 Go duration（`500ms`）或纯秒数（`1.5`）。 |
+| `GOCACHED_TIMEOUT`       | `2s`                        | 远端 get 超时：等待服务端响应头的时间。读取响应体另有上限（30s）。 |
+| `GOCACHED_DRAIN_TIMEOUT` | `60s`                       | go 命令结束时，等待未完成上传的时间。 |
 | `GOCACHED_QUIET`         | 未设置                      | 设为 `1` 时不输出统计行。 |
+
+时长可以写成 Go duration（`500ms`、`1m`）或纯秒数（`1.5`）。时长无效或不为正数时，`gocached` 启动即报错退出，不会回退到默认值。
 
 ### 服务端变慢或宕机时的行为
 
-- **查询：** 远端 get 失败或超过 `GOCACHED_TIMEOUT`，按 miss 处理，由 go 自己编译。连续 3 次远端失败后，本次 go 命令的剩余时间里客户端不再访问服务端。下一个 go 命令会启动新的客户端，重新尝试。
+- **查询：** 远端 get 失败，或在 `GOCACHED_TIMEOUT` 内没有开始响应，按 miss 处理，由 go 自己编译。连续 3 次远端失败后，本次 go 命令的剩余时间里客户端不再访问服务端。下一个 go 命令会启动新的客户端，重新尝试。
 - **校验：** 下载内容按 sha256 output ID 校验，损坏的对象按 miss 处理。
 - **上传：** go 编译出的对象先写入本地目录，go 立即继续。上传在后台进行，最多同时 4 个，每个限时 30s。已有 4 个在进行时，下一个等待空位。上传失败计入 `upload_fail`，不会导致构建失败。
-- **go 命令结束：** 客户端最多等待 60s 让未完成的上传结束（统计行中的 `drain=`），超时后丢弃剩余上传。
+- **go 命令结束：** 客户端最多等待 `GOCACHED_DRAIN_TIMEOUT`（60s）让未完成的上传结束（统计行中的 `drain=`），超时后丢弃剩余上传。
 
 ## 服务端
 
@@ -114,7 +117,7 @@ docker run -d --name gocached --restart unless-stopped \
 
 ### 接口
 
-- `GET /cache/{actionID}` 和 `PUT /cache/{actionID}`：缓存接口（设置了 `GOCACHED_TOKEN` 时需要 token）。上传内容与 output ID 不符时返回 `400`。
+- `GET /cache/{actionID}` 和 `PUT /cache/{actionID}`：缓存接口（设置了 `GOCACHED_TOKEN` 时需要 token）。上传内容与 output ID 不符，或 ID、请求头格式错误时返回 `400`；服务端写入失败（磁盘满、权限问题）返回 `500`。
 - `GET /healthz`：存活检查，不需要 token。
 - `GET /metrics`：`GOCACHED_METRICS_PULL=1` 时提供 Prometheus 指标，不需要 token。
 

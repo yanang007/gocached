@@ -17,6 +17,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/client_golang/prometheus/push"
+
+	"github.com/yanang007/gocached/internal/server"
 )
 
 // Config selects which metrics modes are enabled.
@@ -157,6 +159,9 @@ func (m *collectors) instrument(next http.Handler) http.Handler {
 		start := time.Now()
 		body := &countingBody{ReadCloser: r.Body}
 		r.Body = body
+		if op == "put" {
+			r = r.WithContext(server.OnVerifyFailure(r.Context(), m.verifyFailures.Inc))
+		}
 		rw := &countingWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rw, r)
 
@@ -167,11 +172,6 @@ func (m *collectors) instrument(next http.Handler) http.Handler {
 		}
 		if op == "put" {
 			m.bytes.WithLabelValues("received").Add(float64(body.n))
-			// The server only reads the body after the IDs parse, and
-			// rejects a read body only when size or sha256 mismatch.
-			if rw.status == http.StatusBadRequest && body.read {
-				m.verifyFailures.Inc()
-			}
 		}
 	})
 }
@@ -192,12 +192,10 @@ func result(op string, status int) string {
 
 type countingBody struct {
 	io.ReadCloser
-	n    int64
-	read bool
+	n int64
 }
 
 func (b *countingBody) Read(p []byte) (int, error) {
-	b.read = true
 	n, err := b.ReadCloser.Read(p)
 	b.n += int64(n)
 	return n, err

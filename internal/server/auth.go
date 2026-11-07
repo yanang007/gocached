@@ -3,6 +3,8 @@ package server
 import (
 	"crypto/subtle"
 	"net/http"
+
+	"github.com/yanang007/gocached/internal/bearer"
 )
 
 // Option configures New.
@@ -20,9 +22,9 @@ func (s *server) auth(h http.HandlerFunc) http.Handler {
 	if s.token == "" {
 		return h
 	}
-	want := []byte("Bearer " + s.token)
+	want := []byte(bearer.Value(s.token))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got := []byte(r.Header.Get("Authorization"))
+		got := []byte(r.Header.Get(bearer.Header))
 		if subtle.ConstantTimeCompare(got, want) != 1 {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="gocached"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)

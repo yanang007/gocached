@@ -3,10 +3,13 @@ package breaker_test
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -149,5 +152,86 @@ func TestMissResetsConsecutiveFailures(t *testing.T) {
 	}
 	if got := n.Load(); got != 9 {
 		t.Fatalf("server saw %d requests, want 9 (breaker should stay closed)", got)
+	}
+}
+
+// slowBodyServer sends the response headers at once, then sends body in
+// three parts, waiting step before each one.
+func slowBodyServer(t *testing.T, body string, step time.Duration) string {
+	t.Helper()
+	sum := sha256.Sum256([]byte(body))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(remote.HeaderOutputID, hex.EncodeToString(sum[:]))
+		w.Header().Set(remote.HeaderTime, "0")
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		third := len(body) / 3
+		for _, part := range []string{body[:third], body[third : 2*third], body[2*third:]} {
+			time.Sleep(step)
+			io.WriteString(w, part)
+			w.(http.Flusher).Flush()
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func TestSlowBodyIsNotCutOffByGetTimeout(t *testing.T) {
+	const want = "a large object on a slow link"
+	// Headers arrive at once; the body takes about 600ms, three times the timeout.
+	b := breaker.New(remote.New(slowBodyServer(t, want, 200*time.Millisecond), nil), 3, 200*time.Millisecond)
+
+	_, body, err := b.Get(context.Background(), actionID("slow"))
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer body.Close()
+	got, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("reading body: %v", err)
+	}
+	if string(got) != want {
+		t.Fatalf("body = %q, want %q", got, want)
+	}
+}
+
+// truncatingServer promises a 1000-byte body, sends 10 bytes and drops the
+// connection. It counts requests.
+func truncatingServer(t *testing.T) (string, *atomic.Int64) {
+	t.Helper()
+	var n atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		w.Header().Set(remote.HeaderOutputID, hex.EncodeToString(actionID("out")))
+		w.Header().Set(remote.HeaderTime, "0")
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, "0123456789")
+		w.(http.Flusher).Flush()
+		if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+			conn.Close()
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, &n
+}
+
+func TestBodyReadFailuresTripBreaker(t *testing.T) {
+	url, hits := truncatingServer(t)
+	b := breaker.New(remote.New(url, nil), 3, time.Second)
+
+	for i := 0; i < 5; i++ {
+		_, body, err := b.Get(context.Background(), actionID("cut"))
+		if err != nil {
+			continue
+		}
+		if _, err := io.ReadAll(body); err == nil {
+			t.Fatal("reading a truncated body should fail")
+		}
+		body.Close()
+	}
+	if got := hits.Load(); got != 3 {
+		t.Fatalf("server saw %d requests, want 3 (then the backend is skipped)", got)
 	}
 }
