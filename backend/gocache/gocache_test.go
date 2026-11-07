@@ -195,6 +195,64 @@ func TestGetWithMissingOutputIsMiss(t *testing.T) {
 	}
 }
 
+// putAged stores body under action and backdates both files by age.
+func putAged(t *testing.T, dir string, age time.Duration) (c *gocache.Cache, action []byte, files []string) {
+	t.Helper()
+	c, _ = gocache.New(dir)
+	action = actionID("aged")
+	out := put(t, c, action, "used object")
+	ah, oh := hex.EncodeToString(action), hex.EncodeToString(out)
+	files = []string{
+		filepath.Join(dir, ah[:2], ah+"-a"),
+		filepath.Join(dir, oh[:2], oh+"-d"),
+	}
+	old := time.Now().Add(-age)
+	for _, f := range files {
+		if err := os.Chtimes(f, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return c, action, files
+}
+
+func mtime(t *testing.T, name string) time.Time {
+	t.Helper()
+	fi, err := os.Stat(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.ModTime()
+}
+
+func TestGetRefreshesMtimeOlderThanAnHour(t *testing.T) {
+	c, action, files := putAged(t, t.TempDir(), 2*time.Hour)
+	_, rc, err := c.Get(context.Background(), action)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	rc.Close()
+	for _, f := range files {
+		if age := time.Since(mtime(t, f)); age > time.Minute {
+			t.Errorf("%s: mtime not refreshed on hit (age %v)", filepath.Base(f), age)
+		}
+	}
+}
+
+func TestGetKeepsMtimeYoungerThanAnHour(t *testing.T) {
+	c, action, files := putAged(t, t.TempDir(), 30*time.Minute)
+	before := []time.Time{mtime(t, files[0]), mtime(t, files[1])}
+	_, rc, err := c.Get(context.Background(), action)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	rc.Close()
+	for i, f := range files {
+		if got := mtime(t, f); !got.Equal(before[i]) {
+			t.Errorf("%s: mtime rewritten within an hour (%v -> %v)", filepath.Base(f), before[i], got)
+		}
+	}
+}
+
 // TestReadsEntriesWrittenByGo warms a GOCACHE with the real go command and
 // checks that every action entry go wrote is readable and content-correct.
 func TestReadsEntriesWrittenByGo(t *testing.T) {

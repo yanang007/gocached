@@ -89,6 +89,11 @@ func runServe() error {
 	if addr == "" {
 		addr = ":8080"
 	}
+	// go writes README when it initializes a cache dir; requiring it guards
+	// against serving (and writing into) a mistyped or unmounted path.
+	if _, err := os.Stat(filepath.Join(dir, "README")); err != nil {
+		return fmt.Errorf("%s is not a GOCACHE (no README; run a go build with GOCACHE=%s first): %w", dir, dir, err)
+	}
 	cache, err := gocache.New(dir)
 	if err != nil {
 		return err

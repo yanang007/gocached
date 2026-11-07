@@ -113,9 +113,20 @@ func TestLocalDiskSecondBuildHitsEverything(t *testing.T) {
 // dir and returns its base URL. The server is killed when the test ends.
 func startServer(t *testing.T) string {
 	t.Helper()
+	dir := t.TempDir()
+	// serve requires the README go writes when it initializes a GOCACHE.
+	if err := os.WriteFile(filepath.Join(dir, "README"), []byte("test cache\n"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	return startServerAt(t, dir)
+}
+
+// startServerAt runs `gocached serve` over an existing GOCACHE dir.
+func startServerAt(t *testing.T, dir string) string {
+	t.Helper()
 	cmd := exec.Command(gocachedBin, "serve")
 	cmd.Env = append(os.Environ(),
-		"GOCACHED_CACHE_DIR="+t.TempDir(),
+		"GOCACHED_CACHE_DIR="+dir,
 		"GOCACHED_ADDR=127.0.0.1:0",
 	)
 	stderr, err := cmd.StderrPipe()
@@ -179,5 +190,79 @@ func TestQuietSilencesStatsLine(t *testing.T) {
 	stderr := goBuild(t, t.TempDir(), filepath.Join(t.TempDir(), "out"), "GOCACHED_QUIET=1")
 	if statsLine.MatchString(stderr) {
 		t.Fatalf("GOCACHED_QUIET=1 should silence the stats line, got:\n%s", stderr)
+	}
+}
+
+// plainGoBuild runs `go build -trimpath` on the fixture with GOCACHE=gocache
+// and no GOCACHEPROG, i.e. the host's own go, and returns its stderr.
+func plainGoBuild(t *testing.T, gocache, out string, flags ...string) string {
+	t.Helper()
+	fixture, err := filepath.Abs(filepath.Join("testdata", "fixture"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := append([]string{"build", "-trimpath", "-o", out}, flags...)
+	cmd := exec.Command("go", append(args, ".")...)
+	cmd.Dir = fixture
+	cmd.Env = append(os.Environ(), "GOCACHE="+gocache, "GOCACHEPROG=", "GOFLAGS=", "GOWORK=off")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("plain go build: %v\n%s", err, stderr.String())
+	}
+	return stderr.String()
+}
+
+func TestClientHitsCacheWarmedByHostGo(t *testing.T) {
+	hostCache := t.TempDir()
+	out := filepath.Join(t.TempDir(), "out")
+	plainGoBuild(t, hostCache, out)
+	url := startServerAt(t, hostCache)
+
+	s := parseStats(t, goBuild(t, t.TempDir(), out, "GOCACHED_URL="+url))
+	if s["miss"] != 0 || s["hit_remote"] == 0 {
+		t.Fatalf("client should hit the host-warmed cache entirely, got %v", s)
+	}
+}
+
+func TestHostGoHitsObjectsUploadedByClient(t *testing.T) {
+	hostCache := t.TempDir()
+	if err := os.WriteFile(filepath.Join(hostCache, "README"), []byte("test cache\n"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	url := startServerAt(t, hostCache)
+	out := filepath.Join(t.TempDir(), "out")
+
+	s := parseStats(t, goBuild(t, t.TempDir(), out, "GOCACHED_URL="+url))
+	if s["upload_ok"] == 0 || s["upload_fail"] != 0 {
+		t.Fatalf("client should upload its objects, got %v", s)
+	}
+
+	// -x prints every tool go runs; a full cache hit runs no compile.
+	trace := plainGoBuild(t, hostCache, out, "-x")
+	if regexp.MustCompile(`(?m)[/\\]compile(\.exe)?["\s]`).MatchString(trace) {
+		t.Fatalf("host go recompiled despite uploaded objects:\n%s", trace)
+	}
+}
+
+func TestServeRefusesDirWithoutREADME(t *testing.T) {
+	cmd := exec.Command(gocachedBin, "serve")
+	cmd.Env = append(os.Environ(),
+		"GOCACHED_CACHE_DIR="+t.TempDir(), // exists, but go never initialized it
+		"GOCACHED_ADDR=127.0.0.1:0",
+	)
+	var out []byte
+	var err error
+	done := make(chan struct{})
+	go func() { out, err = cmd.CombinedOutput(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		cmd.Process.Kill()
+		<-done
+		t.Fatal("serve kept running on a dir without README")
+	}
+	if err == nil || !bytes.Contains(out, []byte("README")) {
+		t.Fatalf("want a startup failure mentioning README, got err=%v, output:\n%s", err, out)
 	}
 }
