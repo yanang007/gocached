@@ -1,8 +1,10 @@
 package main_test
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"testing"
+	"time"
 )
 
 // gocachedBin is the path to the gocached binary built once for all e2e tests.
@@ -103,6 +106,72 @@ func TestLocalDiskSecondBuildHitsEverything(t *testing.T) {
 	}
 	if second["hit_local"] == 0 || second["hit_local"] != second["get"] {
 		t.Fatalf("second build should hit locally on every get, got %v", second)
+	}
+}
+
+// startServer runs `gocached serve` on a free port backed by a fresh cache
+// dir and returns its base URL. The server is killed when the test ends.
+func startServer(t *testing.T) string {
+	t.Helper()
+	cmd := exec.Command(gocachedBin, "serve")
+	cmd.Env = append(os.Environ(),
+		"GOCACHED_CACHE_DIR="+t.TempDir(),
+		"GOCACHED_ADDR=127.0.0.1:0",
+	)
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cmd.Process.Kill()
+		cmd.Wait()
+	})
+	urlCh := make(chan string, 1)
+	go func() {
+		listening := regexp.MustCompile(`listening on (http://\S+)`)
+		sc := bufio.NewScanner(stderr)
+		for sc.Scan() {
+			if m := listening.FindStringSubmatch(sc.Text()); m != nil {
+				urlCh <- m[1]
+				break
+			}
+		}
+		io.Copy(io.Discard, stderr) // keep draining so the server never blocks
+	}()
+	select {
+	case u := <-urlCh:
+		return u
+	case <-time.After(10 * time.Second):
+		t.Fatal("server did not report its listen address")
+		return ""
+	}
+}
+
+func TestSecondClientHitsRemoteEverything(t *testing.T) {
+	url := startServer(t)
+	out := filepath.Join(t.TempDir(), "out")
+
+	a := parseStats(t, goBuild(t, t.TempDir(), out, "GOCACHED_URL="+url))
+	if a["miss"] == 0 || a["put"] == 0 || a["upload_ok"] == 0 || a["upload_fail"] != 0 {
+		t.Fatalf("client A should miss, put and upload, got %v", a)
+	}
+
+	b := parseStats(t, goBuild(t, t.TempDir(), out, "GOCACHED_URL="+url))
+	if b["miss"] != 0 {
+		t.Fatalf("client B should not miss, got %v", b)
+	}
+	if b["hit_remote"] == 0 || b["hit_local"]+b["hit_remote"] != b["get"] {
+		t.Fatalf("client B should hit remote, got %v", b)
+	}
+}
+
+func TestWithoutURLStaysLocal(t *testing.T) {
+	s := parseStats(t, goBuild(t, t.TempDir(), filepath.Join(t.TempDir(), "out")))
+	if s["hit_remote"] != 0 || s["upload_ok"] != 0 || s["upload_fail"] != 0 {
+		t.Fatalf("without GOCACHED_URL nothing should touch remote, got %v", s)
 	}
 }
 

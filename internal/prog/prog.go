@@ -1,6 +1,6 @@
 // Package prog implements the GOCACHEPROG side of gocached: it speaks go's
-// cache-program protocol over stdin/stdout and serves requests from a local
-// GOCACHE-format directory.
+// cache-program protocol over stdin/stdout and serves requests from a chain
+// of a local GOCACHE-format directory followed by optional remote backends.
 package prog
 
 import (
@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/yanang007/gocached/backend"
-	"github.com/yanang007/gocached/backend/gocache"
+	"github.com/yanang007/gocached/chain"
 )
 
 // request mirrors cmd/go/internal/cacheprog.Request.
@@ -42,7 +42,9 @@ type response struct {
 
 // Options configures a prog session.
 type Options struct {
-	Cache *gocache.Cache
+	// Chain serves requests; its first backend is the local disk directory
+	// and any further ones (the remote server) are uploaded to on put.
+	Chain *chain.Chain
 	Quiet bool // suppress the stats line on close
 }
 
@@ -121,15 +123,26 @@ func (s *session) handle(ctx context.Context, req request, body []byte) response
 
 func (s *session) get(ctx context.Context, req request) response {
 	s.stats.get.Add(1)
-	obj, path, err := s.opts.Cache.GetFile(ctx, req.ActionID)
+	hit, err := s.opts.Chain.Get(ctx, req.ActionID)
 	if err != nil {
 		// Any backend failure degrades to a miss; go will compile and put.
 		s.stats.miss.Add(1)
 		return response{ID: req.ID, Miss: true}
 	}
-	s.stats.hitLocal.Add(1)
-	t := obj.Time
-	return response{ID: req.ID, OutputID: obj.OutputID, Size: obj.Size, Time: &t, DiskPath: path}
+	path, err := s.opts.Chain.Fill(ctx, req.ActionID, hit)
+	if path == "" {
+		// The content could not land on local disk (e.g. a corrupted or
+		// truncated download); go compiles it instead.
+		s.stats.miss.Add(1)
+		return response{ID: req.ID, Miss: true}
+	}
+	if hit.Index == 0 {
+		s.stats.hitLocal.Add(1)
+	} else {
+		s.stats.hitRemote.Add(1)
+	}
+	t := hit.Object.Time
+	return response{ID: req.ID, OutputID: hit.Object.OutputID, Size: hit.Object.Size, Time: &t, DiskPath: path}
 }
 
 func (s *session) put(ctx context.Context, req request, body []byte) response {
@@ -138,10 +151,26 @@ func (s *session) put(ctx context.Context, req request, body []byte) response {
 		return response{ID: req.ID, Err: fmt.Sprintf("put body is %d bytes, want %d", len(body), req.BodySize)}
 	}
 	obj := backend.Object{OutputID: req.OutputID, Size: req.BodySize}
-	if err := s.opts.Cache.Put(ctx, req.ActionID, obj, bytes.NewReader(body)); err != nil {
+	path, err := s.opts.Chain.PutLocal(ctx, req.ActionID, obj, bytes.NewReader(body))
+	if err != nil {
 		return response{ID: req.ID, Err: err.Error()}
 	}
-	return response{ID: req.ID, DiskPath: s.opts.Cache.OutputFile(req.OutputID)}
+	s.upload(ctx, req.ActionID, obj, path)
+	return response{ID: req.ID, DiskPath: path}
+}
+
+// upload copies a locally stored object to the remaining backends. Failures
+// are counted and never fail the put. It is synchronous for now; this is the
+// seam where asynchronous uploads plug in.
+func (s *session) upload(ctx context.Context, actionID []byte, obj backend.Object, path string) {
+	if s.opts.Chain.Len() < 2 {
+		return
+	}
+	if err := s.opts.Chain.Upload(ctx, actionID, obj, path); err != nil {
+		s.stats.uploadFail.Add(1)
+		return
+	}
+	s.stats.uploadOK.Add(1)
 }
 
 func (s *session) printStats(w io.Writer) {
