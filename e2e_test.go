@@ -5,12 +5,18 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"io/fs"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -177,6 +183,104 @@ func TestSecondClientHitsRemoteEverything(t *testing.T) {
 	if b["hit_remote"] == 0 || b["hit_local"]+b["hit_remote"] != b["get"] {
 		t.Fatalf("client B should hit remote, got %v", b)
 	}
+}
+
+// closedURL returns a URL on 127.0.0.1 where nothing listens any more.
+func closedURL(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	url := "http://" + ln.Addr().String()
+	ln.Close()
+	return url
+}
+
+func TestUnreachableServerCostsAtMostThreeTimeouts(t *testing.T) {
+	const timeout = time.Second
+	out := filepath.Join(t.TempDir(), "out")
+
+	start := time.Now()
+	goBuild(t, t.TempDir(), out) // uncached, local only: the baseline
+	baseline := time.Since(start)
+
+	start = time.Now()
+	s := parseStats(t, goBuild(t, t.TempDir(), out,
+		"GOCACHED_URL="+closedURL(t), "GOCACHED_TIMEOUT="+timeout.String()))
+	elapsed := time.Since(start)
+
+	if s["hit_remote"] != 0 || s["miss"] == 0 {
+		t.Fatalf("an unreachable server should only produce misses, got %v", s)
+	}
+	// Allow for build-time noise on top of "3 timeouts + an uncached build".
+	limit := 3*timeout + baseline + baseline/2 + 2*time.Second
+	if elapsed > limit {
+		t.Fatalf("build took %v with the server down, want at most %v (uncached baseline %v)", elapsed, limit, baseline)
+	}
+}
+
+// tamperingProxy forwards requests to upstream and flips one byte of every
+// non-empty GET response body, keeping headers and length intact. Empty
+// bodies cannot be tampered with; the returned counter reports how many
+// such GET hits passed through untouched.
+func tamperingProxy(t *testing.T, upstream string) (string, *atomic.Int64) {
+	t.Helper()
+	var untouched atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, upstream+r.URL.Path, r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		req.Header = r.Header.Clone()
+		req.ContentLength = r.ContentLength
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if r.Method == http.MethodGet && resp.StatusCode == http.StatusOK {
+			if len(body) > 0 {
+				body[len(body)/2] ^= 0xff
+			} else {
+				untouched.Add(1)
+			}
+		}
+		for k, v := range resp.Header {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(resp.StatusCode)
+		w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, &untouched
+}
+
+func TestTamperedRemoteBodyIsAMiss(t *testing.T) {
+	url := startServer(t)
+	out := filepath.Join(t.TempDir(), "out")
+
+	a := parseStats(t, goBuild(t, t.TempDir(), out, "GOCACHED_URL="+url))
+	if a["upload_ok"] == 0 {
+		t.Fatalf("client A should populate the server, got %v", a)
+	}
+
+	dirB := t.TempDir()
+	proxy, untouched := tamperingProxy(t, url)
+	b := parseStats(t, goBuild(t, dirB, out, "GOCACHED_URL="+proxy))
+	// Only empty outputs, which the proxy cannot corrupt, may still hit.
+	if b["hit_remote"] != int(untouched.Load()) || b["miss"] == 0 {
+		t.Fatalf("tampered downloads should be misses (untouched empty hits: %d), got %v", untouched.Load(), b)
+	}
+	filepath.WalkDir(dirB, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && strings.HasPrefix(d.Name(), ".tmp-") {
+			t.Errorf("tampered download left a temp file: %s", path)
+		}
+		return nil
+	})
 }
 
 func TestWithoutURLStaysLocal(t *testing.T) {

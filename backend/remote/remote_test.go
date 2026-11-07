@@ -6,8 +6,10 @@ import (
 	"crypto/sha256"
 	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -104,6 +106,37 @@ func TestServerRejectsPutWithoutOutputID(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestServerRejectsPutWithMismatchedSHA256AndLeavesNoResidue(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := gocache.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(server.New(chain.New(cache)))
+	defer srv.Close()
+	r := remote.New(srv.URL, srv.Client())
+
+	// The header claims the hash of "genuine", the body is something else of
+	// the same length.
+	err = r.Put(context.Background(), actionID("tampered"), object("genuine"), strings.NewReader("tamperd"))
+	if err == nil || !strings.Contains(err.Error(), "400") {
+		t.Fatalf("want a 400 rejection, got %v", err)
+	}
+	var files []string
+	filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if len(files) != 0 {
+		t.Fatalf("rejected PUT left files on the server: %v", files)
+	}
+	if _, _, err := r.Get(context.Background(), actionID("tampered")); !errors.Is(err, backend.ErrMiss) {
+		t.Fatalf("rejected object should be a miss, got %v", err)
 	}
 }
 

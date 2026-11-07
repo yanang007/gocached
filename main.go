@@ -7,6 +7,9 @@
 //
 //	GOCACHED_DIR    local cache directory (default: <user cache dir>/gocached)
 //	GOCACHED_URL    gocached server base URL; unset means local disk only
+//	GOCACHED_TIMEOUT  remote get timeout (default 2s); after 3 consecutive
+//	                  remote failures remote is skipped for the rest of the
+//	                  go command
 //	GOCACHED_QUIET  set to 1 to silence the stats line printed on close
 //	GOCACHED_TOKEN  shared token sent as "Authorization: Bearer <token>"
 //
@@ -32,8 +35,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"time"
 
 	"github.com/yanang007/gocached/backend"
+	"github.com/yanang007/gocached/backend/breaker"
 	"github.com/yanang007/gocached/backend/gocache"
 	"github.com/yanang007/gocached/backend/remote"
 	"github.com/yanang007/gocached/chain"
@@ -80,13 +86,38 @@ func runProg() error {
 	}
 	var rest []backend.Backend
 	if url := os.Getenv("GOCACHED_URL"); url != "" {
+		timeout, err := remoteTimeout()
+		if err != nil {
+			return err
+		}
 		client := &http.Client{Transport: remote.BearerTransport(os.Getenv("GOCACHED_TOKEN"), nil)}
-		rest = append(rest, remote.New(url, client))
+		rest = append(rest, breaker.New(remote.New(url, client), 3, timeout))
 	}
 	return prog.Run(context.Background(), os.Stdin, os.Stdout, os.Stderr, prog.Options{
 		Chain: chain.New(cache, rest...),
 		Quiet: os.Getenv("GOCACHED_QUIET") == "1",
 	})
+}
+
+// remoteTimeout reads GOCACHED_TIMEOUT, a Go duration ("2s", "500ms") or a
+// plain number of seconds, defaulting to 2s.
+func remoteTimeout() (time.Duration, error) {
+	v := os.Getenv("GOCACHED_TIMEOUT")
+	if v == "" {
+		return 2 * time.Second, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		secs, ferr := strconv.ParseFloat(v, 64)
+		if ferr != nil {
+			return 0, fmt.Errorf("invalid GOCACHED_TIMEOUT %q", v)
+		}
+		d = time.Duration(secs * float64(time.Second))
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("invalid GOCACHED_TIMEOUT %q: must be positive", v)
+	}
+	return d, nil
 }
 
 func runServe() error {
