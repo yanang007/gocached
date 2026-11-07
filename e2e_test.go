@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -294,6 +296,97 @@ func TestQuietSilencesStatsLine(t *testing.T) {
 	stderr := goBuild(t, t.TempDir(), filepath.Join(t.TempDir(), "out"), "GOCACHED_QUIET=1")
 	if statsLine.MatchString(stderr) {
 		t.Fatalf("GOCACHED_QUIET=1 should silence the stats line, got:\n%s", stderr)
+	}
+}
+
+// putProxy starts an in-process proxy in front of the gocached server at
+// target. Every PUT goes to onPut, which may forward it through next or
+// answer itself; everything else is forwarded unchanged.
+func putProxy(t *testing.T, target string, onPut func(w http.ResponseWriter, r *http.Request, next http.Handler)) string {
+	t.Helper()
+	u, err := url.Parse(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := httputil.NewSingleHostReverseProxy(u)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			onPut(w, r, next)
+			return
+		}
+		next.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func TestSlowUploadsDoNotBlockPutsAndDrainOnClose(t *testing.T) {
+	const delay = 300 * time.Millisecond
+	server := startServer(t)
+	slow := putProxy(t, server, func(w http.ResponseWriter, r *http.Request, next http.Handler) {
+		time.Sleep(delay)
+		next.ServeHTTP(w, r)
+	})
+	out := filepath.Join(t.TempDir(), "out")
+
+	start := time.Now()
+	a := parseStats(t, goBuild(t, t.TempDir(), out, "GOCACHED_URL="+slow))
+	elapsed := time.Since(start)
+	if a["put"] == 0 || a["upload_ok"] != a["put"] || a["upload_fail"] != 0 {
+		t.Fatalf("client A should finish every upload before exiting, got %v", a)
+	}
+	// Even at full upload concurrency the uploads alone take this long; a
+	// build that blocked each put on its upload could not be faster.
+	serial := time.Duration(a["put"]) * delay
+	t.Logf("build %v, drain %dms, serial uploads %v", elapsed, a["drain"], serial)
+	if elapsed >= serial/2 {
+		t.Fatalf("puts look blocked on uploads: build took %v, serial uploads take %v", elapsed, serial)
+	}
+
+	b := parseStats(t, goBuild(t, t.TempDir(), out, "GOCACHED_URL="+server))
+	if b["miss"] != 0 || b["hit_remote"] == 0 {
+		t.Fatalf("client B should hit everything client A uploaded, got %v", b)
+	}
+}
+
+func TestHungUploadsAreDroppedAfterDrainTimeout(t *testing.T) {
+	const hung = 3 // fewer than the upload concurrency, so others still flow
+	release := make(chan struct{})
+	var puts atomic.Int64
+	stuck := putProxy(t, startServer(t), func(w http.ResponseWriter, r *http.Request, next http.Handler) {
+		if puts.Add(1) <= hung {
+			select { // hold until the client gives up on the request
+			case <-r.Context().Done():
+			case <-release:
+			}
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+	t.Cleanup(func() { close(release) }) // runs before the proxy shuts down
+
+	start := time.Now()
+	s := parseStats(t, goBuild(t, t.TempDir(), filepath.Join(t.TempDir(), "out"),
+		"GOCACHED_URL="+stuck, "GOCACHED_DRAIN_TIMEOUT=1s"))
+	elapsed := time.Since(start)
+	if elapsed > 20*time.Second {
+		t.Fatalf("build took %v; hung uploads should neither block puts nor outlast the drain timeout", elapsed)
+	}
+	if s["upload_fail"] != hung || s["upload_ok"] != s["put"]-hung {
+		t.Fatalf("the %d hung uploads should be dropped and counted as failed, got %v", hung, s)
+	}
+	if d := s["drain"]; d < 1000 || d > 5000 {
+		t.Fatalf("drain should stop at about the 1s timeout, got %dms", d)
+	}
+}
+
+func TestFailingUploadsDoNotFailTheBuild(t *testing.T) {
+	broken := putProxy(t, startServer(t), func(w http.ResponseWriter, r *http.Request, _ http.Handler) {
+		http.Error(w, "disk full", http.StatusInternalServerError)
+	})
+	s := parseStats(t, goBuild(t, t.TempDir(), filepath.Join(t.TempDir(), "out"), "GOCACHED_URL="+broken))
+	if s["put"] == 0 || s["upload_fail"] != s["put"] || s["upload_ok"] != 0 {
+		t.Fatalf("every upload should fail and be counted, got %v", s)
 	}
 }
 

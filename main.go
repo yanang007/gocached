@@ -11,6 +11,7 @@
 //	                  remote failures remote is skipped for the rest of the
 //	                  go command
 //	GOCACHED_QUIET  set to 1 to silence the stats line printed on close
+//	GOCACHED_DRAIN_TIMEOUT  how long close waits for pending uploads (default: 60s)
 //	GOCACHED_TOKEN  shared token sent as "Authorization: Bearer <token>"
 //
 // Environment for serve:
@@ -96,6 +97,8 @@ func runProg() error {
 	return prog.Run(context.Background(), os.Stdin, os.Stdout, os.Stderr, prog.Options{
 		Chain: chain.New(cache, rest...),
 		Quiet: os.Getenv("GOCACHED_QUIET") == "1",
+
+		DrainTimeout: drainTimeout(),
 	})
 }
 
@@ -148,4 +151,14 @@ func runServe() error {
 	}
 	log.Printf("gocached: serving %s, listening on http://%s", cache.Dir(), ln.Addr())
 	return serveWithMetrics(ln, server.New(chain.New(cache), server.WithToken(token)))
+}
+
+// drainTimeout parses GOCACHED_DRAIN_TIMEOUT; unset or invalid means the
+// default.
+func drainTimeout() time.Duration {
+	d, err := time.ParseDuration(os.Getenv("GOCACHED_DRAIN_TIMEOUT"))
+	if err != nil {
+		return 0
+	}
+	return d
 }
