@@ -13,6 +13,12 @@
 //
 //	GOCACHED_CACHE_DIR  cache directory to serve (required)
 //	GOCACHED_ADDR       listen address (default: :8080)
+//	GOCACHED_METRICS_PULL   set to 1 to serve Prometheus metrics on /metrics
+//	GOCACHED_PUSHGATEWAY    Pushgateway URL; set to push metrics periodically
+//	GOCACHED_PUSH_INTERVAL  push period (default: 15s)
+//
+// /healthz is always served. With neither metrics mode set, no metrics are
+// collected.
 package main
 
 import (
@@ -21,7 +27,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 
@@ -103,5 +108,5 @@ func runServe() error {
 		return err
 	}
 	log.Printf("gocached: serving %s, listening on http://%s", cache.Dir(), ln.Addr())
-	return http.Serve(ln, server.New(chain.New(cache)))
+	return serveWithMetrics(ln, server.New(chain.New(cache)))
 }
