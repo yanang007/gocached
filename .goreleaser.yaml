@@ -1,0 +1,61 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: gocached
+
+builds:
+  - id: gocached
+    main: .
+    binary: gocached
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: gocached
+    ids: [gocached]
+    formats: [tar.gz]
+    # install.sh relies on this name: gocached_<version>_<os>_<arch>.tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+
+checksum:
+  # A fixed name so install.sh can fetch it from releases/latest/download.
+  name_template: checksums.txt
+  algorithm: sha256
+
+dockers_v2:
+  - id: gocached
+    ids: [gocached]
+    dockerfile: Dockerfile
+    images:
+      - ghcr.io/yanang007/gocached
+    tags:
+      - "{{ .Version }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      org.opencontainers.image.source: https://github.com/yanang007/gocached
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+
+release:
+  github:
+    owner: yanang007
+    name: gocached
+  extra_files:
+    - glob: ./install.sh
+
+changelog:
+  sort: asc
