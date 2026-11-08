@@ -1,23 +1,19 @@
 // Package server implements the gocached HTTP cache API over a chain whose
-// first backend is a GOCACHE-format directory. See backend/remote for the
-// wire format.
+// first backend is a GOCACHE-format directory. The wire format is defined in
+// internal/wire.
 package server
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"io"
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 
-	"github.com/yanang007/gocached/backend"
 	"github.com/yanang007/gocached/backend/gocache"
-	"github.com/yanang007/gocached/backend/remote"
 	"github.com/yanang007/gocached/chain"
+	"github.com/yanang007/gocached/internal/wire"
 )
 
 // New returns the HTTP handler serving /cache/{actionID} from c.
@@ -27,9 +23,20 @@ func New(c *chain.Chain, opts ...Option) http.Handler {
 		o(s)
 	}
 	mux := http.NewServeMux()
-	mux.Handle("GET /cache/{actionID}", s.auth(s.get))
-	mux.Handle("PUT /cache/{actionID}", s.auth(s.put))
+	// Only /cache/* is guarded; other routes (e.g. /healthz, /metrics) are
+	// deliberately left unauthenticated.
+	mux.Handle(wire.RouteGet, wire.RequireToken(s.token, http.HandlerFunc(s.get)))
+	mux.Handle(wire.RoutePut, wire.RequireToken(s.token, http.HandlerFunc(s.put)))
 	return mux
+}
+
+// Option configures New.
+type Option func(*server)
+
+// WithToken requires "Authorization: Bearer <token>" on /cache/* requests.
+// An empty token disables authentication.
+func WithToken(token string) Option {
+	return func(s *server) { s.token = token }
 }
 
 type server struct {
@@ -37,16 +44,10 @@ type server struct {
 	token string // empty means no authentication
 }
 
-// parseID decodes a hex sha256 path or header value.
-func parseID(s string) ([]byte, bool) {
-	id, err := hex.DecodeString(s)
-	return id, err == nil && len(id) == sha256.Size
-}
-
 func (s *server) get(w http.ResponseWriter, r *http.Request) {
-	actionID, ok := parseID(r.PathValue("actionID"))
-	if !ok {
-		http.Error(w, "malformed action ID", http.StatusBadRequest)
+	actionID, err := wire.ParseGet(r)
+	if err != nil {
+		wire.WriteError(w, err)
 		return
 	}
 	hit, err := s.chain.Get(r.Context(), actionID)
@@ -68,31 +69,15 @@ func (s *server) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
-	h := w.Header()
-	h.Set(remote.HeaderOutputID, hex.EncodeToString(hit.Object.OutputID))
-	h.Set(remote.HeaderTime, strconv.FormatInt(hit.Object.Time.UnixNano(), 10))
-	h.Set("Content-Type", "application/octet-stream")
-	h.Set("Content-Length", strconv.FormatInt(hit.Object.Size, 10))
-	w.WriteHeader(http.StatusOK)
-	_, _ = f.WriteTo(w)
+	wire.WriteObject(w, hit.Object, f)
 }
 
 func (s *server) put(w http.ResponseWriter, r *http.Request) {
-	actionID, ok := parseID(r.PathValue("actionID"))
-	if !ok {
-		http.Error(w, "malformed action ID", http.StatusBadRequest)
+	actionID, obj, err := wire.ParsePut(r)
+	if err != nil {
+		wire.WriteError(w, err)
 		return
 	}
-	outputID, ok := parseID(r.Header.Get(remote.HeaderOutputID))
-	if !ok {
-		http.Error(w, "missing or malformed "+remote.HeaderOutputID, http.StatusBadRequest)
-		return
-	}
-	if r.ContentLength < 0 {
-		http.Error(w, "Content-Length required", http.StatusLengthRequired)
-		return
-	}
-	obj := backend.Object{OutputID: outputID, Size: r.ContentLength}
 	body := &errBody{r: r.Body}
 	path, err := s.chain.Put(r.Context(), actionID, obj, body)
 	if path == "" {
