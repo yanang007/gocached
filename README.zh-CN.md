@@ -5,7 +5,7 @@
 面向内网 CI 的自建 Go 构建缓存。一个二进制，两个子命令：
 
 - `gocached prog` 是 [`GOCACHEPROG`](https://pkg.go.dev/cmd/go#hdr-Build_and_test_caching) 客户端。先查本地目录，再查 gocached 服务端。go 编译出的对象先写入本地，go 立即拿到结果，上传到服务端在后台进行。
-- `gocached serve` 是 HTTP 缓存服务，以 go 原生 `GOCACHE` 格式读写一个目录。把它指向服务端主机自己的 `GOCACHE`，主机上的 go 和所有 CI runner 就共享同一份缓存：CI 能命中主机构建过的内容，主机也能命中 CI 上传的内容。
+- `gocached serve` 是 HTTP 缓存服务，以 go 原生 `GOCACHE` 格式读写一个目录。
 
 服务端不需要外网，客户端安装完成后也不需要。
 
@@ -60,7 +60,9 @@ gocached: get=812 hit_local=3 hit_remote=790 miss=19 put=19 upload_ok=19 upload_
 
 在全新的 runner 上，`hit_remote` 接近 `get` 说明缓存生效。如果各 runner 的 `miss` 都很高，通常是 Go 版本、构建参数、工作路径或 `-o` 路径不一致（见上文）。
 
-### 客户端环境变量
+### 私有模式（默认）
+
+默认情况下，`gocached prog` 使用私有的本地缓存目录 `<用户缓存目录>/gocached`，不存在时自动创建。全新机器上无需任何准备。
 
 | 变量                     | 默认值                      | 含义 |
 | ------------------------ | --------------------------- | ---- |
@@ -70,6 +72,33 @@ gocached: get=812 hit_local=3 hit_remote=790 miss=19 put=19 upload_ok=19 upload_
 | `GOCACHED_TIMEOUT`       | `2s`                        | 远端 get 超时：等待服务端响应头的时间。读取响应体另有上限（30s）。 |
 | `GOCACHED_DRAIN_TIMEOUT` | `60s`                       | go 命令结束时，等待未完成上传的时间。 |
 | `GOCACHED_QUIET`         | 未设置                      | 设为 `1` 时不输出统计行。 |
+
+### 共享模式
+
+设置 `GOCACHED_SHARE=1`，把本机自己的 `GOCACHE` 用作本地缓存目录。这样经由 `gocached prog` 的构建和本机上普通的 `go` 构建共享同一份缓存，谁都不必重复对方做过的工作。
+
+缓存目录按以下顺序确定：
+
+1. `GOCACHED_DIR`（如果设置了）。
+2. `go env GOCACHE`，它也会遵循 `go env -w` 的设置。
+3. 如果 `go` 命令不存在或执行失败，按 go 自己的规则：`$GOCACHE`，否则 `<用户缓存目录>/go-build`。gocached 会在日志中说明发生了回退。
+
+该目录必须已经是一个 GOCACHE：目录中没有 go 初始化缓存目录时写入的 `README` 文件时，gocached 拒绝启动。初始化一个新目录：
+
+```sh
+GOCACHE=/path/to/cache go build std
+```
+
+然后设置 `GOCACHED_DIR=/path/to/cache` 和 `GOCACHED_SHARE=1`。
+
+共享模式下 `GOCACHE=off` 会报错。
+
+| 变量             | 默认值                 | 含义 |
+| ---------------- | ---------------------- | ---- |
+| `GOCACHED_SHARE` | 未设置                 | 设为 `1` 时启用共享模式。 |
+| `GOCACHED_DIR`   | `go env GOCACHE` 的结果 | 覆盖确定出的主机 GOCACHE。 |
+
+其他客户端变量（`GOCACHED_URL`、`GOCACHED_TOKEN` 等）在两种模式下都适用。
 
 时长可以写成 Go duration（`500ms`、`1m`）或纯秒数（`1.5`）。时长无效或不为正数时，`gocached` 启动即报错退出，不会回退到默认值。
 
@@ -82,36 +111,73 @@ gocached: get=812 hit_local=3 hit_remote=790 miss=19 put=19 upload_ok=19 upload_
 
 ## 服务端
 
-### 用 docker 运行
+### 私有模式
 
-镜像为 `ghcr.io/yanang007/gocached`，基于 `gcr.io/distroless/static-debian12:nonroot`。请以拥有 `GOCACHE` 的主机用户身份运行，这样服务端写入的文件，主机上的 go 仍然可以读写：
+默认情况下，`gocached serve` 使用私有目录，不存在时自动创建，不做其他检查。
+
+```sh
+gocached serve
+# 默认使用 <用户缓存目录>/gocached
+
+GOCACHED_DIR=/var/cache/gocached gocached serve
+```
+
+此模式下，服务的目录与主机的 GOCACHE 相互独立。CI runner 之间仍可通过服务端互相命中，但不会与主机自己的 go 构建共享。
+
+### 共享模式
+
+设置 `GOCACHED_SHARE=1`，让服务端使用主机自己的 GOCACHE，这样 CI 能命中主机构建过的内容，反之亦然。
+
+该目录必须已经是一个 GOCACHE。需要时先初始化一次：
+
+```sh
+GOCACHE=/path/to/cache go build std
+```
+
+然后启动服务端：
+
+```sh
+GOCACHED_SHARE=1 GOCACHED_DIR=/path/to/cache gocached serve
+# 或者使用主机默认的 GOCACHE：
+GOCACHED_SHARE=1 gocached serve
+```
+
+请以拥有该 GOCACHE 的用户身份运行服务端，这样服务端写入的文件，主机上的 go 仍然可以读写。
+
+### 用 Docker 运行
+
+镜像为 `ghcr.io/yanang007/gocached`，基于 `gcr.io/distroless/static-debian12:nonroot`。镜像默认设置 `GOCACHED_DIR=/cache` 和 `GOCACHED_SHARE=1`，只需把主机的 GOCACHE 挂载到 `/cache` 即可。
+
+以拥有该 GOCACHE 的主机用户身份运行：
 
 ```sh
 docker run -d --name gocached --restart unless-stopped \
   --user "$(id -u):$(id -g)" \
   -v "$(go env GOCACHE)":/cache \
-  -e GOCACHED_CACHE_DIR=/cache \
   -e GOCACHED_TOKEN=... \
   -p 8080:8080 \
   ghcr.io/yanang007/gocached:latest
 ```
 
-不加 `--user` 时，容器以 distroless 的 `nonroot` 用户（uid 65532）运行，通常无法写入挂载进来的 `GOCACHE`。
+不加 `--user` 时，容器以 distroless 的 `nonroot` 用户（uid 65532）运行，通常无法写入挂载进来的 GOCACHE。
 
-缓存目录必须已经是一个 `GOCACHE`：目录中没有 go 写入的 `README` 文件时，服务端拒绝启动。如果是新缓存，先在主机上执行一次任意 go 构建。
+挂载的目录必须已经是一个 GOCACHE。如果是新缓存，先在主机上初始化：
 
-不用 docker 运行：`GOCACHED_CACHE_DIR="$(go env GOCACHE)" gocached serve`。
+```sh
+go build std
+```
 
 ### 服务端环境变量
 
-| 变量                     | 默认值 | 含义 |
-| ------------------------ | ------ | ---- |
-| `GOCACHED_CACHE_DIR`     | 必填   | 要提供服务的 `GOCACHE` 目录。镜像中默认为 `/cache`。 |
-| `GOCACHED_ADDR`          | `:8080` | 监听地址。 |
-| `GOCACHED_TOKEN`         | 未设置 | 设置后，`/cache/*` 需要 `Authorization: Bearer <token>`。未设置时服务端输出警告，并接受匿名读写。 |
-| `GOCACHED_METRICS_PULL`  | 未设置 | 设为 `1` 时在 `/metrics` 提供 Prometheus 指标。 |
-| `GOCACHED_PUSHGATEWAY`   | 未设置 | Pushgateway 地址。设置后定期推送指标，退出时再推送一次。 |
-| `GOCACHED_PUSH_INTERVAL` | `15s`  | 推送间隔。 |
+| 变量                     | 默认值                                    | 含义 |
+| ------------------------ | ----------------------------------------- | ---- |
+| `GOCACHED_SHARE`         | 未设置（Docker 镜像中为 `1`）             | 设为 `1` 时启用共享模式（见上文）。 |
+| `GOCACHED_DIR`           | `<用户缓存目录>/gocached`，共享模式下为 `go env GOCACHE`（Docker 镜像中为 `/cache`） | 缓存目录。 |
+| `GOCACHED_ADDR`          | `:8080`                                   | 监听地址。 |
+| `GOCACHED_TOKEN`         | 未设置                                    | 设置后，`/cache/*` 需要 `Authorization: Bearer <token>`。未设置时服务端输出警告，并接受匿名读写。 |
+| `GOCACHED_METRICS_PULL`  | 未设置                                    | 设为 `1` 时在 `/metrics` 提供 Prometheus 指标。 |
+| `GOCACHED_PUSHGATEWAY`   | 未设置                                    | Pushgateway 地址。设置后定期推送指标，退出时再推送一次。 |
+| `GOCACHED_PUSH_INTERVAL` | `15s`                                     | 推送间隔。 |
 
 服务端不处理 TLS。需要加密传输时，请在前面加反向代理。
 
@@ -142,14 +208,16 @@ scrape_configs:
       - targets: ["pushgateway.intranet:9091"]
 ```
 
-pull 和 push 可以同时开启，它们来自同一个 registry，上报相同的计数。此时 Prometheus 会把每条序列存两份：一份来自 `/metrics`（`job` 是你的抓取任务名，`instance` 是 `host:port`），一份来自 Pushgateway（`job="gocached"`、`instance="<hostname>"`）。跨两者求和会得到双倍数值。可以在看板和告警中只选一个来源并按 `job` 标签过滤，也可以在抓取时丢弃其中一份，例如在不用的那个 job 上用 `metric_relabel_configs` 丢弃 `gocached_.*`。
+pull 和 push 可以同时开启，它们来自同一个 registry，上报相同的计数。此时 Prometheus 会把每条序列存两份：一份来自 `/metrics`（`job` 是你的抓取任务名，`instance` 是 `host:port`），一份来自 Pushgateway（`job="gocached"`、`instance="<hostname>"`）。跨两者求和会得到双倍数值。可以在看板和告警中只选一个来源并按 `job` 标签过滤，也可以在抓取时丢弃其中一份，即在不用的那个 job 上用 `metric_relabel_configs` 丢弃 `gocached_.*`。
 
 ## 清理
 
 gocached 从不删除缓存条目。
 
-- **服务端：** 提供服务的目录就是主机自己的 `GOCACHE`，因此适用 go 自带的清理。主机上的 go 在不设置 `GOCACHEPROG` 运行时，会删除 5 天未使用的条目，每天最多一次。服务端命中会刷新条目的修改时间（和 go 一样，每小时最多一次），所以 CI 仍在使用的条目不会被清理。如果主机很少运行 go，请定期执行 `go clean -cache`，或在主机上定时执行一次 `go build` 来触发清理。注意 `go clean -cache` 会清空整个缓存。
-- **客户端：** go 不会清理通过 `GOCACHEPROG` 访问的缓存，所以 `GOCACHED_DIR` 会无限增长。临时 runner 可以忽略这一点。常驻 runner 请定期删除该目录（例如每周通过 cron，在没有构建运行时执行），之后的构建会从服务端重新填充。
+- **服务端（共享模式）：** 提供服务的目录就是主机自己的 GOCACHE，因此适用 go 自带的清理。主机上的 go 在不设置 `GOCACHEPROG` 运行时，会删除 5 天未使用的条目，每天最多一次。服务端命中会刷新条目的修改时间（和 go 一样，每小时最多一次），所以 CI 仍在使用的条目不会被清理。如果主机很少运行 go，请定期执行 `go clean -cache`，或在主机上定时执行一次 `go build` 来触发清理。注意 `go clean -cache` 会清空整个缓存。
+- **服务端（私有模式）：** go 的清理不作用于私有缓存目录。请定期删除该目录以回收空间。
+- **客户端（私有模式）：** go 不会清理通过 `GOCACHEPROG` 访问的缓存，所以私有缓存目录会无限增长。临时 runner 可以忽略这一点。常驻 runner 请定期删除该目录（例如每周通过 cron，在没有构建运行时执行），之后的构建会从服务端重新填充。
+- **客户端（共享模式）：** 缓存目录就是本机自己的 GOCACHE，因此只要 go 在本机不设置 `GOCACHEPROG` 运行，就适用 go 自带的清理。
 
 ## 发布
 

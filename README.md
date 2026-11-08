@@ -5,7 +5,7 @@ English | [简体中文](README.zh-CN.md)
 A self-hosted Go build cache for intranet CI. One binary, two subcommands:
 
 - `gocached prog` is a [`GOCACHEPROG`](https://pkg.go.dev/cmd/go#hdr-Build_and_test_caching) client. It looks up a local directory first, then a gocached server. Objects that go compiles are written locally, go gets its answer immediately, and the upload to the server runs in the background.
-- `gocached serve` is an HTTP cache server that reads and writes a directory in go's native `GOCACHE` format. Point it at the server host's own `GOCACHE`, and the host's go and every CI runner share one cache: CI hits what the host built, and the host hits what CI uploaded.
+- `gocached serve` is an HTTP cache server that reads and writes a directory in go's native `GOCACHE` format.
 
 The server needs no internet access, and the client does not either once it is installed.
 
@@ -60,16 +60,45 @@ gocached: get=812 hit_local=3 hit_remote=790 miss=19 put=19 upload_ok=19 upload_
 
 `hit_remote` close to `get` on a fresh runner means the cache works. A high `miss` across runners usually means the Go version, flags, working path or `-o` path differ (see above).
 
-### Client environment
+### Private setup (default)
 
-| Variable           | Default                       | Meaning |
-| ------------------ | ----------------------------- | ------- |
-| `GOCACHED_DIR`     | `<user cache dir>/gocached`   | Local cache directory, created if missing. `<user cache dir>` is `$XDG_CACHE_HOME` or `~/.cache` on Linux. |
-| `GOCACHED_URL`     | unset                         | Server base URL. Unset means local disk only. |
-| `GOCACHED_TOKEN`   | unset                         | Shared token, sent as `Authorization: Bearer <token>`. |
-| `GOCACHED_TIMEOUT` | `2s`                          | Remote get timeout: how long to wait for the server's response headers. Reading the body is bounded separately (30s). |
-| `GOCACHED_DRAIN_TIMEOUT` | `60s`                   | How long the client waits for pending uploads when the go command ends. |
-| `GOCACHED_QUIET`   | unset                         | Set to `1` to silence the stats line. |
+By default, `gocached prog` uses a private local cache directory, `<user cache dir>/gocached`, created automatically if it does not exist. Nothing else is required on a fresh machine.
+
+| Variable                 | Default                       | Meaning |
+| ------------------------ | ----------------------------- | ------- |
+| `GOCACHED_DIR`           | `<user cache dir>/gocached`   | Local cache directory, created if missing. `<user cache dir>` is `$XDG_CACHE_HOME` or `~/.cache` on Linux. |
+| `GOCACHED_URL`           | unset                         | Server base URL. Unset means local disk only. |
+| `GOCACHED_TOKEN`         | unset                         | Shared token, sent as `Authorization: Bearer <token>`. |
+| `GOCACHED_TIMEOUT`       | `2s`                          | Remote get timeout: how long to wait for the server's response headers. Reading the body is bounded separately (30s). |
+| `GOCACHED_DRAIN_TIMEOUT` | `60s`                         | How long the client waits for pending uploads when the go command ends. |
+| `GOCACHED_QUIET`         | unset                         | Set to `1` to silence the stats line. |
+
+### Shared setup
+
+Set `GOCACHED_SHARE=1` to use the machine's own `GOCACHE` as the local cache directory. Builds through `gocached prog` and plain `go` builds on that machine then share one cache, so neither repeats the other's work.
+
+The cache directory is resolved in this order:
+
+1. `GOCACHED_DIR`, if set.
+2. `go env GOCACHE`, which also honours `go env -w` settings.
+3. If the `go` command is missing or fails, go's own rule: `$GOCACHE`, otherwise `<user cache dir>/go-build`. gocached logs that it fell back.
+
+The directory must already be a GOCACHE: gocached refuses to start unless it holds the `README` file go writes when it initializes a cache dir. To initialize a fresh directory:
+
+```sh
+GOCACHE=/path/to/cache go build std
+```
+
+After that, set `GOCACHED_DIR=/path/to/cache` and `GOCACHED_SHARE=1`.
+
+`GOCACHE=off` is an error in shared mode.
+
+| Variable         | Default                    | Meaning |
+| ---------------- | -------------------------- | ------- |
+| `GOCACHED_SHARE` | unset                      | Set to `1` to enable shared mode. |
+| `GOCACHED_DIR`   | result of `go env GOCACHE` | Override the resolved host GOCACHE. |
+
+All other client variables (`GOCACHED_URL`, `GOCACHED_TOKEN`, etc.) apply in both modes.
 
 Durations are a Go duration (`500ms`, `1m`) or plain seconds (`1.5`). An invalid or non-positive duration makes `gocached` exit with an error at startup instead of falling back to the default.
 
@@ -82,36 +111,73 @@ Durations are a Go duration (`500ms`, `1m`) or plain seconds (`1.5`). An invalid
 
 ## Server
 
-### Run with docker
+### Private setup
 
-The image is `ghcr.io/yanang007/gocached`, built on `gcr.io/distroless/static-debian12:nonroot`. Run it as the host user that owns the `GOCACHE`, so files written by the server stay readable and writable for the host's go:
+By default `gocached serve` uses a private directory, created if it does not exist, with no further checks.
+
+```sh
+gocached serve
+# uses <user cache dir>/gocached by default
+
+GOCACHED_DIR=/var/cache/gocached gocached serve
+```
+
+In this mode the served directory is separate from the host's GOCACHE. CI runners still share hits with each other through the server, but not with the host's own go builds.
+
+### Shared setup
+
+Set `GOCACHED_SHARE=1` to point the server at the host's own GOCACHE, so that CI hits what the host built and vice versa.
+
+The directory must already be a GOCACHE. Initialize it once if needed:
+
+```sh
+GOCACHE=/path/to/cache go build std
+```
+
+Then run the server:
+
+```sh
+GOCACHED_SHARE=1 GOCACHED_DIR=/path/to/cache gocached serve
+# or, using the host's default GOCACHE:
+GOCACHED_SHARE=1 gocached serve
+```
+
+Run the server as the same user that owns the GOCACHE, so files written by the server stay readable and writable for the host's go.
+
+### Run with Docker
+
+The image is `ghcr.io/yanang007/gocached`, built on `gcr.io/distroless/static-debian12:nonroot`. It defaults to `GOCACHED_DIR=/cache` and `GOCACHED_SHARE=1`, so mounting a host GOCACHE at `/cache` is all the configuration needed.
+
+Run as the host user that owns the GOCACHE:
 
 ```sh
 docker run -d --name gocached --restart unless-stopped \
   --user "$(id -u):$(id -g)" \
   -v "$(go env GOCACHE)":/cache \
-  -e GOCACHED_CACHE_DIR=/cache \
   -e GOCACHED_TOKEN=... \
   -p 8080:8080 \
   ghcr.io/yanang007/gocached:latest
 ```
 
-Without `--user`, the container runs as distroless's `nonroot` user (uid 65532), which usually cannot write to a bind-mounted `GOCACHE`.
+Without `--user`, the container runs as distroless's `nonroot` user (uid 65532), which usually cannot write to a bind-mounted GOCACHE.
 
-The cache directory must already be a `GOCACHE`: the server refuses to start unless it contains the `README` file go writes there. Run any go build on the host once if the cache is new.
+The mounted directory must already be a GOCACHE. If it is new, initialize it on the host first:
 
-To run without docker: `GOCACHED_CACHE_DIR="$(go env GOCACHE)" gocached serve`.
+```sh
+go build std
+```
 
 ### Server environment
 
-| Variable                 | Default  | Meaning |
-| ------------------------ | -------- | ------- |
-| `GOCACHED_CACHE_DIR`     | required | `GOCACHE` directory to serve. In the image it defaults to `/cache`. |
-| `GOCACHED_ADDR`          | `:8080`  | Listen address. |
-| `GOCACHED_TOKEN`         | unset    | If set, `/cache/*` requires `Authorization: Bearer <token>`. If unset, the server logs a warning and accepts anonymous reads and writes. |
-| `GOCACHED_METRICS_PULL`  | unset    | Set to `1` to serve Prometheus metrics on `/metrics`. |
-| `GOCACHED_PUSHGATEWAY`   | unset    | Pushgateway URL. If set, metrics are pushed periodically and once more on shutdown. |
-| `GOCACHED_PUSH_INTERVAL` | `15s`    | Push period. |
+| Variable                 | Default                                    | Meaning |
+| ------------------------ | ------------------------------------------ | ------- |
+| `GOCACHED_SHARE`         | unset (`1` in the Docker image)            | Set to `1` for shared mode (see above). |
+| `GOCACHED_DIR`           | `<user cache dir>/gocached`, or `go env GOCACHE` in shared mode (`/cache` in the Docker image) | Cache directory. |
+| `GOCACHED_ADDR`          | `:8080`                                    | Listen address. |
+| `GOCACHED_TOKEN`         | unset                                      | If set, `/cache/*` requires `Authorization: Bearer <token>`. If unset, the server logs a warning and accepts anonymous reads and writes. |
+| `GOCACHED_METRICS_PULL`  | unset                                      | Set to `1` to serve Prometheus metrics on `/metrics`. |
+| `GOCACHED_PUSHGATEWAY`   | unset                                      | Pushgateway URL. If set, metrics are pushed periodically and once more on shutdown. |
+| `GOCACHED_PUSH_INTERVAL` | `15s`                                      | Push period. |
 
 The server does not terminate TLS. Put it behind a reverse proxy if traffic needs encryption.
 
@@ -142,14 +208,16 @@ scrape_configs:
       - targets: ["pushgateway.intranet:9091"]
 ```
 
-Pull and push can be enabled together and report the same counters from one registry. Prometheus then stores every series twice: once from `/metrics` (with your scrape job's `job` and `host:port` as `instance`) and once from the Pushgateway (`job="gocached"`, `instance="<hostname>"`). Summing across both doubles the numbers. Either pick one source for dashboards and alerts and filter on its `job` label, or drop one copy at scrape time, for example with a `metric_relabel_configs` rule that drops `gocached_.*` on the job you do not use.
+Pull and push can be enabled together and report the same counters from one registry. Prometheus then stores every series twice: once from `/metrics` (with your scrape job's `job` and `host:port` as `instance`) and once from the Pushgateway (`job="gocached"`, `instance="<hostname>"`). Summing across both doubles the numbers. Either pick one source for dashboards and alerts and filter on its `job` label, or drop one copy at scrape time with a `metric_relabel_configs` rule that drops `gocached_.*` on the job you do not use.
 
 ## Cleanup
 
 gocached never deletes cache entries.
 
-- **Server:** the served directory is the host's own `GOCACHE`, so go's built-in trimming applies. go removes entries unused for 5 days, at most once a day, whenever go runs on the host without `GOCACHEPROG`. Server hits refresh an entry's modification time (at most once an hour, as go does), so entries CI keeps using are not trimmed. If the host rarely runs go, run `go clean -cache` from time to time, or schedule a periodic `go build` on the host so trimming happens. Note that `go clean -cache` empties the whole cache.
-- **Client:** go does not trim a cache it reaches through `GOCACHEPROG`, so `GOCACHED_DIR` grows without bound. Ephemeral runners can ignore this. On long-lived runners, delete the directory periodically (for example weekly, from cron, while no build is running). The next builds refill it from the server.
+- **Server (shared mode):** the served directory is the host's own GOCACHE, so go's built-in trimming applies. go removes entries unused for 5 days, at most once a day, whenever go runs on the host without `GOCACHEPROG`. Server hits refresh an entry's modification time (at most once an hour, as go does), so entries CI keeps using are not trimmed. If the host rarely runs go, run `go clean -cache` from time to time, or schedule a periodic `go build` on the host so trimming happens. Note that `go clean -cache` empties the whole cache.
+- **Server (private mode):** go's trimming does not apply to a private cache dir. Delete the directory periodically to reclaim space.
+- **Client (private mode):** go does not trim a cache it reaches through `GOCACHEPROG`, so the private cache dir grows without bound. Ephemeral runners can ignore this. On long-lived runners, delete the directory periodically (for example weekly, from cron, while no build is running). The next builds refill it from the server.
+- **Client (shared mode):** the cache dir is the machine's own GOCACHE, so go's built-in trimming applies whenever go runs there without `GOCACHEPROG`.
 
 ## Releases
 
