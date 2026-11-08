@@ -4,11 +4,7 @@
 package prog
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -17,29 +13,9 @@ import (
 
 	"github.com/yanang007/gocached/backend"
 	"github.com/yanang007/gocached/chain"
+	"github.com/yanang007/gocached/internal/cacheprog"
 	"golang.org/x/sync/errgroup"
 )
-
-// request mirrors cmd/go/internal/cacheprog.Request.
-type request struct {
-	ID       int64
-	Command  string
-	ActionID []byte `json:",omitempty"`
-	OutputID []byte `json:",omitempty"`
-	BodySize int64  `json:",omitempty"`
-}
-
-// response mirrors cmd/go/internal/cacheprog.Response.
-type response struct {
-	ID            int64
-	Err           string     `json:",omitempty"`
-	KnownCommands []string   `json:",omitempty"`
-	Miss          bool       `json:",omitempty"`
-	OutputID      []byte     `json:",omitempty"`
-	Size          int64      `json:",omitempty"`
-	Time          *time.Time `json:",omitempty"`
-	DiskPath      string     `json:",omitempty"`
-}
 
 // Options configures a prog session.
 type Options struct {
@@ -71,56 +47,23 @@ func Run(ctx context.Context, in io.Reader, out, errOut io.Writer, opts Options)
 	if opts.DrainTimeout <= 0 {
 		opts.DrainTimeout = DefaultDrainTimeout
 	}
-	s := &session{opts: opts, bw: bufio.NewWriter(out), errOut: errOut}
-	s.enc = json.NewEncoder(s.bw)
+	s := &session{opts: opts, errOut: errOut}
 	s.uploadCtx, s.dropUploads = context.WithCancel(ctx)
 	defer s.dropUploads()
 	s.uploads.SetLimit(uploadConcurrency)
-	if err := s.send(response{KnownCommands: []string{"get", "put", "close"}}); err != nil {
-		return err
+	err := cacheprog.Serve(ctx, in, out, s)
+	if err == nil && !s.closed {
+		// EOF without close: still give pending uploads their chance.
+		s.drain()
 	}
-
-	dec := json.NewDecoder(bufio.NewReader(in))
-	var wg sync.WaitGroup
-	defer wg.Wait()
-	for {
-		var req request
-		if err := dec.Decode(&req); err != nil {
-			if errors.Is(err, io.EOF) {
-				wg.Wait()
-				s.drain()
-				return nil
-			}
-			return fmt.Errorf("gocached: reading request: %w", err)
-		}
-		var body []byte
-		if req.Command == "put" && req.BodySize > 0 {
-			// The body follows as a JSON string holding standard base64.
-			if err := dec.Decode(&body); err != nil {
-				return fmt.Errorf("gocached: reading put body: %w", err)
-			}
-		}
-		if req.Command == "close" {
-			wg.Wait() // finish in-flight requests before acknowledging
-			drained := s.drain()
-			s.printStats(errOut, drained)
-			return s.send(response{ID: req.ID})
-		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_ = s.send(s.handle(ctx, req, body))
-		}()
-	}
+	return err
 }
 
+// session implements cacheprog.Handler on top of the chain.
 type session struct {
-	opts  Options
-	stats counters
-
-	mu  sync.Mutex
-	bw  *bufio.Writer
-	enc *json.Encoder
+	opts   Options
+	stats  counters
+	closed bool // Close ran; set and read on Serve's goroutine only
 
 	errOut      io.Writer
 	uploads     errgroup.Group // background uploads; tasks never return errors
@@ -135,63 +78,46 @@ type session struct {
 	loggedFail bool  // the first upload failure has been logged
 }
 
-// send writes one response line; responses may be sent in any order.
-func (s *session) send(r response) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.enc.Encode(r); err != nil {
-		return err
-	}
-	return s.bw.Flush()
-}
-
-func (s *session) handle(ctx context.Context, req request, body []byte) response {
-	switch req.Command {
-	case "get":
-		return s.get(ctx, req)
-	case "put":
-		return s.put(ctx, req, body)
-	default:
-		return response{ID: req.ID, Err: fmt.Sprintf("unknown command %q", req.Command)}
-	}
-}
-
-func (s *session) get(ctx context.Context, req request) response {
+func (s *session) Get(ctx context.Context, actionID []byte) (cacheprog.Entry, error) {
 	s.stats.get.Add(1)
-	hit, err := s.opts.Chain.Get(ctx, req.ActionID)
+	hit, err := s.opts.Chain.Get(ctx, actionID)
 	if err != nil {
 		// Any backend failure degrades to a miss; go will compile and put.
 		s.stats.miss.Add(1)
-		return response{ID: req.ID, Miss: true}
+		return cacheprog.Entry{}, cacheprog.ErrMiss
 	}
-	path, err := s.opts.Chain.Fill(ctx, req.ActionID, hit)
+	path, _ := s.opts.Chain.Fill(ctx, actionID, hit)
 	if path == "" {
 		// The content could not land on local disk (e.g. a corrupted or
 		// truncated download); go compiles it instead.
 		s.stats.miss.Add(1)
-		return response{ID: req.ID, Miss: true}
+		return cacheprog.Entry{}, cacheprog.ErrMiss
 	}
 	if hit.Index == 0 {
 		s.stats.hitLocal.Add(1)
 	} else {
 		s.stats.hitRemote.Add(1)
 	}
-	t := hit.Object.Time
-	return response{ID: req.ID, OutputID: hit.Object.OutputID, Size: hit.Object.Size, Time: &t, DiskPath: path}
+	return cacheprog.Entry{OutputID: hit.Object.OutputID, Size: hit.Object.Size, Time: hit.Object.Time, DiskPath: path}, nil
 }
 
-func (s *session) put(ctx context.Context, req request, body []byte) response {
+func (s *session) Put(ctx context.Context, actionID, outputID []byte, size int64, body io.Reader) (string, error) {
 	s.stats.put.Add(1)
-	if int64(len(body)) != req.BodySize {
-		return response{ID: req.ID, Err: fmt.Sprintf("put body is %d bytes, want %d", len(body), req.BodySize)}
-	}
-	obj := backend.Object{OutputID: req.OutputID, Size: req.BodySize}
-	path, err := s.opts.Chain.PutLocal(ctx, req.ActionID, obj, bytes.NewReader(body))
+	obj := backend.Object{OutputID: outputID, Size: size}
+	path, err := s.opts.Chain.PutLocal(ctx, actionID, obj, body)
 	if err != nil {
-		return response{ID: req.ID, Err: err.Error()}
+		return "", err
 	}
-	s.upload(req.ActionID, obj, path)
-	return response{ID: req.ID, DiskPath: path}
+	s.upload(actionID, obj, path)
+	return path, nil
+}
+
+// Close drains pending uploads and prints the stats line. Serve calls it
+// after every in-flight get and put has returned.
+func (s *session) Close(context.Context) error {
+	s.closed = true
+	s.printStats(s.errOut, s.drain())
+	return nil
 }
 
 // upload copies a locally stored object to the remaining backends in the
