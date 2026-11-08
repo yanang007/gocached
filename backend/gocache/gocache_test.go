@@ -260,7 +260,7 @@ func TestReadsEntriesWrittenByGo(t *testing.T) {
 		t.Skip("runs go build")
 	}
 	dir := t.TempDir()
-	fixture, _ := filepath.Abs(filepath.Join("..", "..", "testdata", "fixture"))
+	fixture, _ := filepath.Abs(filepath.Join("testdata", "fixture"))
 	cmd := exec.Command("go", "build", "-trimpath", "-o", filepath.Join(t.TempDir(), "out"), ".")
 	cmd.Dir = fixture
 	cmd.Env = append(os.Environ(), "GOCACHE="+dir, "GOCACHEPROG=", "GOFLAGS=", "GOWORK=off")

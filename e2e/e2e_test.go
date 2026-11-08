@@ -1,4 +1,4 @@
-package main_test
+package e2e_test
 
 import (
 	"bufio"
@@ -37,7 +37,7 @@ func TestMain(m *testing.M) {
 		name += ".exe"
 	}
 	gocachedBin = filepath.Join(dir, name)
-	build := exec.Command("go", "build", "-o", gocachedBin, ".")
+	build := exec.Command("go", "build", "-o", gocachedBin, "github.com/yanang007/gocached")
 	if out, err := build.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "building gocached: %v\n%s", err, out)
 		os.RemoveAll(dir)
