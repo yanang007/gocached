@@ -1,0 +1,3 @@
+# Metrics remote write is left to the deployment, not built into gocached
+
+gocached exposes metrics by pull (`/metrics`) and Pushgateway only. Prometheus remote write will be handled at deploy time by whatever agent the site already runs (e.g. Grafana Alloy scraping `/metrics`). No Go library covers remote write in a stable way: client_golang's `exp/api/remote` is untagged and needs Go 1.26, and the OTel Go SDK has no remote-write exporter. The Remote-Write spec itself recommends scraping applications rather than having them push. See `docs/research/metrics-export.md` and `docs/research/wire-model-and-alloy.md`.
