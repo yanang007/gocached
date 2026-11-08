@@ -39,13 +39,13 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 
 	"github.com/yanang007/gocached/backend"
 	"github.com/yanang007/gocached/backend/breaker"
 	"github.com/yanang007/gocached/backend/gocache"
 	"github.com/yanang007/gocached/backend/remote"
 	"github.com/yanang007/gocached/chain"
+	"github.com/yanang007/gocached/internal/gocachedir"
 	"github.com/yanang007/gocached/internal/prog"
 	"github.com/yanang007/gocached/internal/server"
 )
@@ -102,7 +102,7 @@ func runServe() error {
 	}
 	// go writes README when it initializes a cache dir; requiring it guards
 	// against serving (and writing into) a mistyped or unmounted path.
-	if _, err := os.Stat(filepath.Join(cfg.Dir, "README")); err != nil {
+	if err := gocachedir.CheckREADME(cfg.Dir); err != nil {
 		return fmt.Errorf("%s is not a GOCACHE (no README; run a go build with GOCACHE=%s first): %w", cfg.Dir, cfg.Dir, err)
 	}
 	cache, err := gocache.New(cfg.Dir)
