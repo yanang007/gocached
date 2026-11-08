@@ -86,6 +86,7 @@ func goBuild(t *testing.T, cacheDir, out string, extraEnv ...string) string {
 		`GOCACHEPROG="`+gocachedBin+`" prog`,
 		"GOCACHE="+t.TempDir(), // go still opens a DiskCache for non-build data
 		"GOCACHED_DIR="+cacheDir,
+		"GOCACHED_SHARE=",
 		"GOCACHED_QUIET=",
 		"GOFLAGS=",
 		"GOWORK=off",
@@ -150,7 +151,8 @@ func runServe(t *testing.T, dir string, extraEnv ...string) (url, startupLog str
 	t.Helper()
 	cmd := exec.Command(gocachedBin, "serve")
 	cmd.Env = append(os.Environ(),
-		"GOCACHED_CACHE_DIR="+dir,
+		"GOCACHED_DIR="+dir,
+		"GOCACHED_SHARE=",
 		"GOCACHED_ADDR=127.0.0.1:0",
 		"GOCACHED_TOKEN=",
 	)
@@ -492,32 +494,10 @@ func TestInvalidDurationsFailFast(t *testing.T) {
 	}{
 		{[]string{"prog"}, []string{"GOCACHED_DIR=" + t.TempDir(), "GOCACHED_URL=http://127.0.0.1:1", "GOCACHED_TIMEOUT=soon"}, "GOCACHED_TIMEOUT"},
 		{[]string{"prog"}, []string{"GOCACHED_DIR=" + t.TempDir(), "GOCACHED_DRAIN_TIMEOUT=-1s"}, "GOCACHED_DRAIN_TIMEOUT"},
-		{[]string{"serve"}, []string{"GOCACHED_CACHE_DIR=" + gocacheDir(t), "GOCACHED_ADDR=127.0.0.1:0", "GOCACHED_PUSH_INTERVAL=0"}, "GOCACHED_PUSH_INTERVAL"},
+		{[]string{"serve"}, []string{"GOCACHED_DIR=" + gocacheDir(t), "GOCACHED_ADDR=127.0.0.1:0", "GOCACHED_PUSH_INTERVAL=0"}, "GOCACHED_PUSH_INTERVAL"},
 	} {
 		if out := runFailing(t, tc.args, tc.env...); !strings.Contains(out, tc.name) {
 			t.Errorf("gocached %v with a bad %s: output does not name it:\n%s", tc.args, tc.name, out)
 		}
-	}
-}
-
-func TestServeRefusesDirWithoutREADME(t *testing.T) {
-	cmd := exec.Command(gocachedBin, "serve")
-	cmd.Env = append(os.Environ(),
-		"GOCACHED_CACHE_DIR="+t.TempDir(), // exists, but go never initialized it
-		"GOCACHED_ADDR=127.0.0.1:0",
-	)
-	var out []byte
-	var err error
-	done := make(chan struct{})
-	go func() { out, err = cmd.CombinedOutput(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		cmd.Process.Kill()
-		<-done
-		t.Fatal("serve kept running on a dir without README")
-	}
-	if err == nil || !bytes.Contains(out, []byte("README")) {
-		t.Fatalf("want a startup failure mentioning README, got err=%v, output:\n%s", err, out)
 	}
 }

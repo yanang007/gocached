@@ -3,9 +3,18 @@
 //	gocached prog    GOCACHEPROG client (set GOCACHEPROG="gocached prog")
 //	gocached serve   HTTP cache server over a GOCACHE-format directory
 //
+// Environment for both:
+//
+//	GOCACHED_DIR            cache dir; default <user cache dir>/gocached, or the
+//	                        host GOCACHE in shared mode
+//	GOCACHED_SHARE          set to 1 for shared mode: the cache dir is the host
+//	                        GOCACHE (GOCACHED_DIR, otherwise `go env GOCACHE`,
+//	                        otherwise $GOCACHE or <user cache dir>/go-build if
+//	                        go is unusable). It must hold the README go writes,
+//	                        and GOCACHE=off is an error.
+//
 // Environment for prog:
 //
-//	GOCACHED_DIR            local cache directory (default: <user cache dir>/gocached)
 //	GOCACHED_URL            gocached server base URL; unset means local disk only
 //	GOCACHED_TOKEN          shared token sent as "Authorization: Bearer <token>"
 //	GOCACHED_TIMEOUT        remote get timeout until the response headers
@@ -17,7 +26,6 @@
 //
 // Environment for serve:
 //
-//	GOCACHED_CACHE_DIR      cache directory to serve (required)
 //	GOCACHED_ADDR           listen address (default: :8080)
 //	GOCACHED_TOKEN          if set, /cache/* requires "Authorization: Bearer <token>"
 //	GOCACHED_METRICS_PULL   set to 1 to serve Prometheus metrics on /metrics
@@ -39,13 +47,13 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/yanang007/gocached/backend"
 	"github.com/yanang007/gocached/backend/breaker"
 	"github.com/yanang007/gocached/backend/gocache"
 	"github.com/yanang007/gocached/backend/remote"
 	"github.com/yanang007/gocached/chain"
-	"github.com/yanang007/gocached/internal/gocachedir"
 	"github.com/yanang007/gocached/internal/prog"
 	"github.com/yanang007/gocached/internal/server"
 )
@@ -86,12 +94,12 @@ func runProg() error {
 	var rest []backend.Backend
 	if cfg.URL != "" {
 		client := &http.Client{Transport: remote.BearerTransport(cfg.Token, nil)}
-		rest = append(rest, breaker.New(remote.New(cfg.URL, client), breakerMaxFailures, cfg.RemoteTimeout))
+		rest = append(rest, breaker.New(remote.New(cfg.URL, client), breakerMaxFailures, time.Duration(cfg.RemoteTimeout)))
 	}
 	return prog.Run(context.Background(), os.Stdin, os.Stdout, os.Stderr, prog.Options{
 		Chain:        chain.New(cache, rest...),
-		Quiet:        cfg.Quiet,
-		DrainTimeout: cfg.DrainTimeout,
+		Quiet:        bool(cfg.Quiet),
+		DrainTimeout: time.Duration(cfg.DrainTimeout),
 	})
 }
 
@@ -100,10 +108,9 @@ func runServe() error {
 	if err != nil {
 		return err
 	}
-	// go writes README when it initializes a cache dir; requiring it guards
-	// against serving (and writing into) a mistyped or unmounted path.
-	if err := gocachedir.CheckREADME(cfg.Dir); err != nil {
-		return fmt.Errorf("%s is not a GOCACHE (no README; run a go build with GOCACHE=%s first): %w", cfg.Dir, cfg.Dir, err)
+	m, err := cfg.metrics()
+	if err != nil {
+		return err
 	}
 	cache, err := gocache.New(cfg.Dir)
 	if err != nil {
@@ -117,5 +124,5 @@ func runServe() error {
 		log.Printf("gocached: WARNING: GOCACHED_TOKEN is not set; /cache/* accepts unauthenticated reads and writes")
 	}
 	log.Printf("gocached: serving %s, listening on http://%s", cache.Dir(), ln.Addr())
-	return serveWithMetrics(ln, cfg.Metrics, server.New(chain.New(cache), server.WithToken(cfg.Token)))
+	return serveWithMetrics(ln, m, server.New(chain.New(cache), server.WithToken(cfg.Token)))
 }

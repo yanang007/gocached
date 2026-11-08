@@ -4,7 +4,8 @@ FROM gcr.io/distroless/static-debian12:nonroot
 ARG TARGETPLATFORM
 COPY $TARGETPLATFORM/gocached /usr/local/bin/gocached
 ENV GOCACHED_ADDR=:8080 \
-    GOCACHED_CACHE_DIR=/cache
+    GOCACHED_DIR=/cache \
+    GOCACHED_SHARE=1
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/gocached"]
 CMD ["serve"]

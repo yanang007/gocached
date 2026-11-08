@@ -3,6 +3,7 @@ module github.com/yanang007/gocached
 go 1.25.0
 
 require (
+	github.com/caarlos0/env/v11 v11.3.1
 	github.com/prometheus/client_golang v1.23.2
 	golang.org/x/sync v0.19.0
 )

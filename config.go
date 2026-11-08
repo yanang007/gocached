@@ -4,10 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
+	"reflect"
 	"strconv"
 	"time"
 
+	"github.com/caarlos0/env/v11"
+
+	"github.com/yanang007/gocached/internal/gocachedir"
 	"github.com/yanang007/gocached/internal/metrics"
 	"github.com/yanang007/gocached/internal/prog"
 )
@@ -16,99 +19,130 @@ import (
 // remote for the rest of a go command.
 const breakerMaxFailures = 3
 
-// defaultRemoteTimeout is the default GOCACHED_TIMEOUT.
-const defaultRemoteTimeout = 2 * time.Second
+// CacheDirEnv is the environment shared by prog and serve that selects the
+// cache dir. Both resolve it with gocachedir.Resolve (ADR 0003).
+type CacheDirEnv struct {
+	Dir    string `env:"GOCACHED_DIR"`
+	Shared flag   `env:"GOCACHED_SHARE"`
+}
+
+// resolve replaces Dir with the resolved cache dir.
+func (e *CacheDirEnv) resolve() error {
+	dir, err := gocachedir.Resolve(gocachedir.ResolveOptions{Dir: e.Dir, Shared: bool(e.Shared)})
+	e.Dir = dir
+	return err
+}
 
 // progConfig is the environment of `gocached prog`.
 type progConfig struct {
-	Dir           string        // GOCACHED_DIR
-	URL           string        // GOCACHED_URL; empty means local only
-	Token         string        // GOCACHED_TOKEN
-	RemoteTimeout time.Duration // GOCACHED_TIMEOUT
-	DrainTimeout  time.Duration // GOCACHED_DRAIN_TIMEOUT
-	Quiet         bool          // GOCACHED_QUIET=1
+	CacheDirEnv
+	URL           string   `env:"GOCACHED_URL"` // empty means local only
+	Token         string   `env:"GOCACHED_TOKEN"`
+	RemoteTimeout duration `env:"GOCACHED_TIMEOUT" envDefault:"2s"`
+	DrainTimeout  duration `env:"GOCACHED_DRAIN_TIMEOUT"`
+	Quiet         flag     `env:"GOCACHED_QUIET"`
 }
 
 func progConfigFromEnv() (progConfig, error) {
-	cfg := progConfig{
-		Dir:   os.Getenv("GOCACHED_DIR"),
-		URL:   os.Getenv("GOCACHED_URL"),
-		Token: os.Getenv("GOCACHED_TOKEN"),
-		Quiet: os.Getenv("GOCACHED_QUIET") == "1",
-	}
-	if cfg.Dir == "" {
-		base, err := os.UserCacheDir()
-		if err != nil {
-			return cfg, fmt.Errorf("GOCACHED_DIR not set and no user cache dir: %w", err)
-		}
-		cfg.Dir = filepath.Join(base, "gocached")
-	}
-	var err error
-	if cfg.RemoteTimeout, err = envDuration("GOCACHED_TIMEOUT", defaultRemoteTimeout); err != nil {
+	cfg := progConfig{DrainTimeout: duration(prog.DefaultDrainTimeout)}
+	if err := parseEnv(&cfg); err != nil {
 		return cfg, err
 	}
-	if cfg.DrainTimeout, err = envDuration("GOCACHED_DRAIN_TIMEOUT", prog.DefaultDrainTimeout); err != nil {
-		return cfg, err
-	}
-	return cfg, nil
+	return cfg, cfg.resolve()
 }
 
 // serveConfig is the environment of `gocached serve`.
 type serveConfig struct {
-	Dir     string         // GOCACHED_CACHE_DIR, required
-	Addr    string         // GOCACHED_ADDR
-	Token   string         // GOCACHED_TOKEN; empty means no authentication
-	Metrics metrics.Config // GOCACHED_METRICS_PULL, GOCACHED_PUSHGATEWAY, GOCACHED_PUSH_INTERVAL
+	CacheDirEnv
+	Addr         string   `env:"GOCACHED_ADDR" envDefault:":8080"`
+	Token        string   `env:"GOCACHED_TOKEN"` // empty means no authentication
+	MetricsPull  flag     `env:"GOCACHED_METRICS_PULL"`
+	Pushgateway  string   `env:"GOCACHED_PUSHGATEWAY"`
+	PushInterval duration `env:"GOCACHED_PUSH_INTERVAL"`
 }
 
 func serveConfigFromEnv() (serveConfig, error) {
-	cfg := serveConfig{
-		Dir:   os.Getenv("GOCACHED_CACHE_DIR"),
-		Addr:  os.Getenv("GOCACHED_ADDR"),
-		Token: os.Getenv("GOCACHED_TOKEN"),
-		Metrics: metrics.Config{
-			Pull:        os.Getenv("GOCACHED_METRICS_PULL") == "1",
-			Pushgateway: os.Getenv("GOCACHED_PUSHGATEWAY"),
-		},
-	}
-	if cfg.Dir == "" {
-		return cfg, errors.New("GOCACHED_CACHE_DIR is required")
-	}
-	if cfg.Addr == "" {
-		cfg.Addr = ":8080"
-	}
-	var err error
-	if cfg.Metrics.PushInterval, err = envDuration("GOCACHED_PUSH_INTERVAL", metrics.DefaultPushInterval); err != nil {
+	cfg := serveConfig{PushInterval: duration(metrics.DefaultPushInterval)}
+	if err := parseEnv(&cfg); err != nil {
 		return cfg, err
 	}
-	if cfg.Metrics.Pushgateway != "" {
-		host, err := os.Hostname()
-		if err != nil {
-			return cfg, fmt.Errorf("hostname for Pushgateway instance label: %w", err)
-		}
-		cfg.Metrics.Instance = host
-	}
-	return cfg, nil
+	return cfg, cfg.resolve()
 }
 
-// envDuration reads the environment variable name as a Go duration ("2s",
-// "500ms") or a plain number of seconds ("1.5"). Unset or empty means def;
-// anything else that is not a positive duration is an error.
-func envDuration(name string, def time.Duration) (time.Duration, error) {
-	v := os.Getenv(name)
-	if v == "" {
-		return def, nil
+// metrics returns the metrics setup, naming the Pushgateway instance after
+// the host.
+func (c serveConfig) metrics() (metrics.Config, error) {
+	m := metrics.Config{
+		Pull:         bool(c.MetricsPull),
+		Pushgateway:  c.Pushgateway,
+		PushInterval: time.Duration(c.PushInterval),
 	}
-	d, err := time.ParseDuration(v)
+	if m.Pushgateway != "" {
+		host, err := os.Hostname()
+		if err != nil {
+			return m, fmt.Errorf("hostname for Pushgateway instance label: %w", err)
+		}
+		m.Instance = host
+	}
+	return m, nil
+}
+
+// parseEnv fills cfg from the environment. An unset or empty variable keeps
+// the field's envDefault or preset value. A value that fails to parse is an
+// error naming the variable.
+func parseEnv(cfg any) error {
+	err := env.Parse(cfg)
+	var agg env.AggregateError
+	if !errors.As(err, &agg) {
+		return err
+	}
+	errs := make([]error, len(agg.Errors))
+	for i, e := range agg.Errors {
+		errs[i] = e
+		var pe env.ParseError
+		if errors.As(e, &pe) {
+			errs[i] = fmt.Errorf("invalid %s %w", envName(reflect.TypeOf(cfg).Elem(), pe.Name), pe.Err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// envName returns the env tag of the field called name in struct type t,
+// searching embedded structs too.
+func envName(t reflect.Type, name string) string {
+	if f, ok := t.FieldByName(name); ok {
+		if tag := f.Tag.Get("env"); tag != "" {
+			return tag
+		}
+	}
+	return name
+}
+
+// duration is a positive time.Duration written as a Go duration ("2s",
+// "500ms") or a plain number of seconds ("1.5").
+type duration time.Duration
+
+func (d *duration) UnmarshalText(text []byte) error {
+	v := string(text)
+	p, err := time.ParseDuration(v)
 	if err != nil {
 		secs, ferr := strconv.ParseFloat(v, 64)
 		if ferr != nil {
-			return 0, fmt.Errorf("invalid %s %q: want a duration such as 2s or a number of seconds", name, v)
+			return fmt.Errorf("%q: want a duration such as 2s or a number of seconds", v)
 		}
-		d = time.Duration(secs * float64(time.Second))
+		p = time.Duration(secs * float64(time.Second))
 	}
-	if d <= 0 {
-		return 0, fmt.Errorf("invalid %s %q: must be positive", name, v)
+	if p <= 0 {
+		return fmt.Errorf("%q: must be positive", v)
 	}
-	return d, nil
+	*d = duration(p)
+	return nil
+}
+
+// flag is a switch that is on only when set to "1".
+type flag bool
+
+func (f *flag) UnmarshalText(text []byte) error {
+	*f = string(text) == "1"
+	return nil
 }
