@@ -141,7 +141,7 @@ func ReadObject(resp *http.Response) (backend.Object, io.ReadCloser, error) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
-		return backend.Object{}, nil, fmt.Errorf("remote: GET status %s", resp.Status)
+		return backend.Object{}, nil, fmt.Errorf("wire: GET status %s", resp.Status)
 	}
 	obj, err := parseObject(resp)
 	if err != nil {
@@ -152,16 +152,16 @@ func ReadObject(resp *http.Response) (backend.Object, io.ReadCloser, error) {
 }
 
 func parseObject(resp *http.Response) (backend.Object, error) {
-	out, err := hex.DecodeString(resp.Header.Get(HeaderOutputID))
-	if err != nil || len(out) == 0 {
-		return backend.Object{}, fmt.Errorf("remote: bad %s header", HeaderOutputID)
+	out, ok := parseID(resp.Header.Get(HeaderOutputID))
+	if !ok {
+		return backend.Object{}, fmt.Errorf("wire: bad %s header", HeaderOutputID)
 	}
 	if resp.ContentLength < 0 {
-		return backend.Object{}, fmt.Errorf("remote: response has no Content-Length")
+		return backend.Object{}, fmt.Errorf("wire: response has no Content-Length")
 	}
 	ns, err := strconv.ParseInt(resp.Header.Get(HeaderTime), 10, 64)
 	if err != nil {
-		return backend.Object{}, fmt.Errorf("remote: bad %s header", HeaderTime)
+		return backend.Object{}, fmt.Errorf("wire: bad %s header", HeaderTime)
 	}
 	return backend.Object{OutputID: out, Size: resp.ContentLength, Time: time.Unix(0, ns)}, nil
 }
@@ -172,7 +172,7 @@ func ReadPutResponse(resp *http.Response) error {
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("remote: PUT status %s", resp.Status)
+		return fmt.Errorf("wire: PUT status %s", resp.Status)
 	}
 	return nil
 }

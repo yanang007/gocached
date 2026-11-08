@@ -306,6 +306,7 @@ func TestClientRejectsResponseWithBadMetadata(t *testing.T) {
 	cases := map[string]map[string]string{
 		"missing output ID": {wire.HeaderTime: "0"},
 		"non-hex output ID": {wire.HeaderOutputID: "zz", wire.HeaderTime: "0"},
+		"short output ID":   {wire.HeaderOutputID: "abcd", wire.HeaderTime: "0"},
 		"missing time":      {wire.HeaderOutputID: goodID},
 		"non-numeric time":  {wire.HeaderOutputID: goodID, wire.HeaderTime: "noon"},
 	}

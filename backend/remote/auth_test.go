@@ -14,6 +14,7 @@ import (
 	"github.com/yanang007/gocached/backend/remote"
 	"github.com/yanang007/gocached/chain"
 	"github.com/yanang007/gocached/internal/server"
+	"github.com/yanang007/gocached/internal/wire"
 )
 
 // newTokenServer starts a server over a fresh cache dir that requires token
@@ -30,7 +31,7 @@ func newTokenServer(t *testing.T, token string) *httptest.Server {
 }
 
 func tokenClient(token string) *http.Client {
-	return &http.Client{Transport: remote.BearerTransport(token, nil)}
+	return &http.Client{Transport: wire.BearerTransport(token, nil)}
 }
 
 func TestServerAnswers401WithoutCorrectToken(t *testing.T) {

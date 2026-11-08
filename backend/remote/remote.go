@@ -11,19 +11,6 @@ import (
 	"github.com/yanang007/gocached/internal/wire"
 )
 
-// Header names shared with the server, re-exported from internal/wire.
-const (
-	HeaderOutputID = wire.HeaderOutputID
-	HeaderTime     = wire.HeaderTime
-)
-
-// BearerTransport returns a RoundTripper that sends
-// "Authorization: Bearer <token>" on every request via base (nil means
-// http.DefaultTransport). An empty token returns base unchanged.
-func BearerTransport(token string, base http.RoundTripper) http.RoundTripper {
-	return wire.BearerTransport(token, base)
-}
-
 // Remote is a backend.Backend over a gocached server.
 type Remote struct {
 	base   string
