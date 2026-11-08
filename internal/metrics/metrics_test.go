@@ -16,10 +16,10 @@ import (
 	"time"
 
 	"github.com/yanang007/gocached/backend/gocache"
-	"github.com/yanang007/gocached/backend/remote"
 	"github.com/yanang007/gocached/chain"
 	"github.com/yanang007/gocached/internal/metrics"
 	"github.com/yanang007/gocached/internal/server"
+	"github.com/yanang007/gocached/internal/wire"
 )
 
 // startServer serves a fresh cache dir through metrics.Start(cfg).
@@ -74,12 +74,12 @@ func status(t *testing.T, method, url string) int {
 func exercise(t *testing.T, srv *httptest.Server) {
 	t.Helper()
 	resp, _ := do(t, http.MethodPut, srv.URL+"/cache/"+actionID("a"),
-		map[string]string{remote.HeaderOutputID: sumHex("hello metric")}, "hello metric")
+		map[string]string{wire.HeaderOutputID: sumHex("hello metric")}, "hello metric")
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("put status = %d", resp.StatusCode)
 	}
 	resp, _ = do(t, http.MethodPut, srv.URL+"/cache/"+actionID("b"),
-		map[string]string{remote.HeaderOutputID: sumHex("original")}, "tampered")
+		map[string]string{wire.HeaderOutputID: sumHex("original")}, "tampered")
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("tampered put status = %d", resp.StatusCode)
 	}
@@ -144,13 +144,13 @@ func TestLocalWriteFailureIs500AndNotAVerifyFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp, _ := do(t, http.MethodPut, srv.URL+"/cache/"+actionID("io"),
-		map[string]string{remote.HeaderOutputID: out}, "valid body")
+		map[string]string{wire.HeaderOutputID: out}, "valid body")
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("put status = %d, want 500", resp.StatusCode)
 	}
 	// A malformed output ID is a client error, but not a verification failure.
 	resp, _ = do(t, http.MethodPut, srv.URL+"/cache/"+actionID("bad"),
-		map[string]string{remote.HeaderOutputID: "zz"}, "body")
+		map[string]string{wire.HeaderOutputID: "zz"}, "body")
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("bad header put status = %d, want 400", resp.StatusCode)
 	}
@@ -172,7 +172,7 @@ func TestBrokenUploadIsRejectedButNotAVerifyFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	fmt.Fprintf(conn, "PUT /cache/%s HTTP/1.1\r\nHost: x\r\n%s: %s\r\nContent-Length: 100\r\n\r\nabcd",
-		actionID("cut"), remote.HeaderOutputID, sumHex("whatever"))
+		actionID("cut"), wire.HeaderOutputID, sumHex("whatever"))
 	conn.(*net.TCPConn).CloseWrite()
 	io.Copy(io.Discard, conn) // wait for the server to finish the request
 	conn.Close()

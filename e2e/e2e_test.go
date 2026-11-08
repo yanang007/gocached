@@ -346,7 +346,12 @@ func putProxy(t *testing.T, target string, onPut func(w http.ResponseWriter, r *
 func TestSlowUploadsDoNotBlockPutsAndDrainOnClose(t *testing.T) {
 	const delay = 300 * time.Millisecond
 	server := startServer(t)
+	var inFlight, maxInFlight atomic.Int64
 	slow := putProxy(t, server, func(w http.ResponseWriter, r *http.Request, next http.Handler) {
+		n := inFlight.Add(1)
+		defer inFlight.Add(-1)
+		for m := maxInFlight.Load(); n > m && !maxInFlight.CompareAndSwap(m, n); m = maxInFlight.Load() {
+		}
 		time.Sleep(delay)
 		next.ServeHTTP(w, r)
 	})
@@ -355,14 +360,25 @@ func TestSlowUploadsDoNotBlockPutsAndDrainOnClose(t *testing.T) {
 	start := time.Now()
 	a := parseStats(t, goBuild(t, t.TempDir(), out, "GOCACHED_URL="+slow))
 	elapsed := time.Since(start)
+	serial := time.Duration(a["put"]) * delay
+	t.Logf("build %v, drain %dms, serial uploads %v, max uploads in flight %d", elapsed, a["drain"], serial, maxInFlight.Load())
+	// Close drains: every upload reached the server before prog exited.
 	if a["put"] == 0 || a["upload_ok"] != a["put"] || a["upload_fail"] != 0 {
 		t.Fatalf("client A should finish every upload before exiting, got %v", a)
 	}
-	// Even at full upload concurrency the uploads alone take this long; a
-	// build that blocked each put on its upload could not be faster.
-	serial := time.Duration(a["put"]) * delay
-	t.Logf("build %v, drain %dms, serial uploads %v", elapsed, a["drain"], serial)
-	if elapsed >= serial/2 {
+	// Puts hand uploads to the background pool and return, so slow uploads
+	// pile up at the server side by side.
+	if got := maxInFlight.Load(); got < 2 {
+		t.Fatalf("uploads never overlapped (max %d in flight); puts look blocked on uploads", got)
+	}
+	// The last puts return before their slow uploads finish, so close has
+	// uploads left to wait for.
+	if a["drain"] == 0 {
+		t.Fatalf("close had no pending uploads to drain; puts look blocked on uploads, got %v", a)
+	}
+	// A forgiving backstop: a build that blocked each put on its upload
+	// would take at least serial.
+	if elapsed >= serial {
 		t.Fatalf("puts look blocked on uploads: build took %v, serial uploads take %v", elapsed, serial)
 	}
 

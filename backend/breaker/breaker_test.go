@@ -18,6 +18,7 @@ import (
 	"github.com/yanang007/gocached/backend"
 	"github.com/yanang007/gocached/backend/breaker"
 	"github.com/yanang007/gocached/backend/remote"
+	"github.com/yanang007/gocached/internal/wire"
 )
 
 func actionID(seed string) []byte {
@@ -161,8 +162,8 @@ func slowBodyServer(t *testing.T, body string, step time.Duration) string {
 	t.Helper()
 	sum := sha256.Sum256([]byte(body))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(remote.HeaderOutputID, hex.EncodeToString(sum[:]))
-		w.Header().Set(remote.HeaderTime, "0")
+		w.Header().Set(wire.HeaderOutputID, hex.EncodeToString(sum[:]))
+		w.Header().Set(wire.HeaderTime, "0")
 		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		w.WriteHeader(http.StatusOK)
 		w.(http.Flusher).Flush()
@@ -203,8 +204,8 @@ func truncatingServer(t *testing.T) (string, *atomic.Int64) {
 	var n atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n.Add(1)
-		w.Header().Set(remote.HeaderOutputID, hex.EncodeToString(actionID("out")))
-		w.Header().Set(remote.HeaderTime, "0")
+		w.Header().Set(wire.HeaderOutputID, hex.EncodeToString(actionID("out")))
+		w.Header().Set(wire.HeaderTime, "0")
 		w.Header().Set("Content-Length", "1000")
 		w.WriteHeader(http.StatusOK)
 		io.WriteString(w, "0123456789")

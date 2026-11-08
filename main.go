@@ -56,6 +56,7 @@ import (
 	"github.com/yanang007/gocached/chain"
 	"github.com/yanang007/gocached/internal/prog"
 	"github.com/yanang007/gocached/internal/server"
+	"github.com/yanang007/gocached/internal/wire"
 )
 
 func main() {
@@ -93,7 +94,7 @@ func runProg() error {
 	}
 	var rest []backend.Backend
 	if cfg.URL != "" {
-		client := &http.Client{Transport: remote.BearerTransport(cfg.Token, nil)}
+		client := &http.Client{Transport: wire.BearerTransport(cfg.Token, nil)}
 		rest = append(rest, breaker.New(remote.New(cfg.URL, client), breakerMaxFailures, time.Duration(cfg.RemoteTimeout)))
 	}
 	return prog.Run(context.Background(), os.Stdin, os.Stdout, os.Stderr, prog.Options{

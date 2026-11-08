@@ -39,6 +39,22 @@ func TestServePrivateCreatesMissingDirWithoutREADME(t *testing.T) {
 	}
 }
 
+func TestProgPrivateCreatesMissingDirWithoutREADME(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "does", "not", "exist")
+	out := filepath.Join(t.TempDir(), "out")
+	first := parseStats(t, goBuild(t, dir, out, "GOCACHED_SHARE="))
+	if first["put"] == 0 || !hasActionEntry(t, dir) {
+		t.Fatalf("prog should create the private dir and store entries in it, got %v", first)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "README")); err == nil {
+		t.Fatal("prog should not write a README into a private dir")
+	}
+	second := parseStats(t, goBuild(t, dir, out, "GOCACHED_SHARE="))
+	if second["miss"] != 0 || second["hit_local"] != second["get"] {
+		t.Fatalf("a second build should hit the README-less private dir, got %v", second)
+	}
+}
+
 func TestServeSharedUsesGoEnvGOCACHE(t *testing.T) {
 	host := gocacheDir(t)
 	_, log := runServe(t, "", "GOCACHED_SHARE=1", "GOCACHE="+host)
