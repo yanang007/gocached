@@ -13,6 +13,9 @@ The content hash of the output a build step produced. It lets anyone holding the
 **Object**:
 What the cache stores for one action ID: the output content plus its output ID, size, and the time it entered the cache.
 
+**Kind**:
+What sort of entry an object is, such as a package index or a compiled package, recognized from the first bytes of its content when it is stored. It decides whether an object is worth sharing with other machines.
+
 **Backend**:
 One place objects can be stored and looked up, such as the local disk or a remote server.
 

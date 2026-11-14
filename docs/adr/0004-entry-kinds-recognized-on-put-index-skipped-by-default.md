@@ -1,0 +1,11 @@
+# Entry kinds are recognized from put bodies; index entries are skipped by default
+
+Some cache entries never hit on another CI machine. Go's package index is keyed on absolute paths and file mtimes, so every fresh checkout gives it new keys, and in one vendored CI build 2,650 of 2,659 uploads were index entries that no later build could use. See `docs/research/go-cache-entry-kinds.md`.
+
+gocached recognizes the **kind** of an entry from the leading bytes of its put body: `index` (`go index v2\n`), `archive` (`!<arch>\n`), `testlog` (`# test log\n`), `empty` (size 0) and `other`. Matching is exact; a future index format is `other` until gocached learns it. The GOCACHEPROG protocol gives a get only the opaque action ID, so gets are not classified; how kinds apply to gets is left to a later decision.
+
+`GOCACHED_SKIP_KINDS` lists the kinds to skip, read by both commands with the same meaning: the client does not upload them, the server does not accept them. The default on both is `index`; `none` skips nothing; `all` skips every kind including `other`, which makes a client read-only against the remote and lets an operator stop all writes to a server. An unknown name fails startup.
+
+The client stores every entry locally first, because go needs a disk path, and then sends `?kind=` with each upload. The server rejects a declared skipped kind without reading the body, otherwise sniffs the body, and answers a skipped kind with 415 and `Gocached-Rejected-Kind`. The client counts that as skipped and rejected, not as an upload failure, does not trip its breaker on it, and stops uploading that kind for the rest of the session. The server's word is final, so a client with no or different skip config still converges on the server's policy.
+
+We rejected keying the decision on action IDs, because they are opaque hashes, and rewriting index keys or paths on the server, because the server never sees the inputs and index payloads embed absolute paths. We also kept `empty` out of the default: empty bodies are mostly compile stdout, which go reads after every archive hit, and skipping them would turn remote hits into rebuilds. Test output is also left to upload; whether it can hit depends on which files the test reads, not on its kind.
