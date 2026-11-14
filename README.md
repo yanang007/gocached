@@ -12,9 +12,12 @@ The server needs no internet access, and the client does not either once it is i
 ## Requirements and cross-machine hits
 
 - **Go 1.24 or later** on the clients (`GOCACHEPROG` became generally available in Go 1.24).
-- **One Go version everywhere.** The action ID go uses as a cache key includes the Go version, GOOS/GOARCH, build flags and environment, so runners and the server host only share hits when these match.
-- **Build with `-trimpath`, or from a fixed working path.** Without `-trimpath`, go hashes the source directory into the action IDs of main-module packages, so a checkout in a different directory misses on those packages (the standard library and dependencies still hit). With `-trimpath`, builds of the same module from different paths share compile and link entries. Set it once for all commands with `GOFLAGS=-trimpath`.
+- **Use the same Go version.** The action ID go uses as a cache key includes the Go version, GOOS/GOARCH, build flags and environment variables. Runners share hits with each other, and with the server host, only when these match.
+- **Use `GOFLAGS=-trimpath`.** Without `-trimpath`, the compile cache key includes each package's source directory, so a checkout in a different directory misses. The standard library is unaffected, and dependencies hit only when the module cache path is the same. With `-trimpath`, the key contains no directory paths, so builds of the same module from different working directories share hits.
+- **Use `GODEBUG=goindex=0` in CI.**[^goindex] The package index lets one machine skip re-parsing directories that did not change. CI checks the code out afresh, so these entries almost never hit. Turning it off does not change build results, compiled packages still come from the cache, and it saves one server lookup per index.
 - **Use a fixed `-o` path.** go hashes the `-o` output path into an action ID, so `go build -o /tmp/job-1234/app` and `go build -o /tmp/job-5678/app` miss on that step. Use a stable path such as `-o bin/app` relative to the checkout.
+
+[^goindex]: `goindex` is an undocumented setting: the source declares it as `godebug.New("#goindex")` ([go1.25.7](https://github.com/golang/go/blob/go1.25.7/src/cmd/go/internal/modindex/read.go#L37)), where the `#` prefix marks it as undocumented. A Go maintainer [says](https://github.com/golang/go/issues/69179#issuecomment-2361218222) in golang/go#69179 that turning the index off should not cause correctness problems. See `docs/research/go-cache-entry-kinds.md`.
 
 ## Client
 
@@ -48,6 +51,7 @@ export GOCACHEPROG="gocached prog"
 export GOCACHED_URL=http://cache.intranet:8080
 export GOCACHED_TOKEN=...          # if the server requires one
 export GOFLAGS=-trimpath
+export GODEBUG="${GODEBUG:+$GODEBUG,}goindex=0"   # recommended in CI, see above
 
 go build -o bin/app ./cmd/app     # unchanged build commands
 ```
@@ -55,8 +59,10 @@ go build -o bin/app ./cmd/app     # unchanged build commands
 At the end of each go command, `gocached prog` prints one line to stderr:
 
 ```
-gocached: get=812 hit_local=3 hit_remote=790 miss=19 put=19 upload_ok=19 upload_fail=0 drain=41ms
+gocached: get=812 hit_local=3 hit_remote=790 miss=19 put=19 upload_ok=12 upload_fail=0 skip=7 rejected=0 drain=41ms kinds=index:7/7,archive:6/0,empty:6/0
 ```
+
+`skip` counts objects stored locally but not uploaded because of their kind (see [Entry kinds](#entry-kinds)), and `rejected` the part of those the server refused. `kinds=` lists, per kind, how many objects were put and how many of them were skipped.
 
 `hit_remote` close to `get` on a fresh runner means the cache works. A high `miss` across runners usually means the Go version, flags, working path or `-o` path differ (see above).
 
@@ -72,6 +78,7 @@ By default, `gocached prog` uses a private local cache directory, `<user cache d
 | `GOCACHED_TIMEOUT`       | `2s`                          | Remote get timeout: how long to wait for the server's response headers. Reading the body is bounded separately (30s). |
 | `GOCACHED_DRAIN_TIMEOUT` | `60s`                         | How long the client waits for pending uploads when the go command ends. |
 | `GOCACHED_QUIET`         | unset                         | Set to `1` to silence the stats line. |
+| `GOCACHED_SKIP_KINDS`    | `index`                       | Entry kinds to keep local and never upload (see [Entry kinds](#entry-kinds)). |
 
 ### Shared setup
 
@@ -107,6 +114,7 @@ Durations are a Go duration (`500ms`, `1m`) or plain seconds (`1.5`). An invalid
 - **Lookups:** a remote get that fails, or whose response does not start within `GOCACHED_TIMEOUT`, counts as a miss, and go compiles the object itself. After 3 consecutive remote failures, the client skips the server for the rest of that go command. The next go command starts a new client and tries again.
 - **Verification:** downloads are checked against their sha256 output ID. A corrupted object counts as a miss.
 - **Uploads:** objects go compiles are written to the local directory first and go continues at once. Uploads run in the background, at most 4 at a time, each limited to 30s. When 4 are in flight, the next one waits for a free slot. A failed upload is counted in `upload_fail` and never fails the build.
+- **Refused kinds:** a server that does not accept a kind answers `415`. The client counts it in `skip` and `rejected`, not in `upload_fail`, never trips the breaker on it, and stops uploading that kind for the rest of the go command.
 - **End of the go command:** the client waits up to `GOCACHED_DRAIN_TIMEOUT` (60s) for pending uploads (`drain=` in the stats line), then drops whatever is left.
 
 ## Server
@@ -178,12 +186,13 @@ go build std
 | `GOCACHED_METRICS_PULL`  | unset                                      | Set to `1` to serve Prometheus metrics on `/metrics`. |
 | `GOCACHED_PUSHGATEWAY`   | unset                                      | Pushgateway URL. If set, metrics are pushed periodically and once more on shutdown. |
 | `GOCACHED_PUSH_INTERVAL` | `15s`                                      | Push period. |
+| `GOCACHED_SKIP_KINDS`    | `index`                                    | Entry kinds refused on upload with `415` (see [Entry kinds](#entry-kinds)). Gets are not affected. |
 
 The server does not terminate TLS. Put it behind a reverse proxy if traffic needs encryption.
 
 ### Endpoints
 
-- `GET /cache/{actionID}` and `PUT /cache/{actionID}`: the cache API (token-protected when `GOCACHED_TOKEN` is set). Uploads whose content does not match their output ID, or with malformed IDs or headers, are rejected with `400`; a server-side write failure (disk full, permissions) returns `500`.
+- `GET /cache/{actionID}` and `PUT /cache/{actionID}`: the cache API (token-protected when `GOCACHED_TOKEN` is set). A `PUT` may declare its kind as `?kind=<kind>`; a kind the server skips is refused with `415` and a `Gocached-Rejected-Kind` header. Uploads whose content does not match their output ID, or with malformed IDs or headers, are rejected with `400`; a server-side write failure (disk full, permissions) returns `500`.
 - `GET /healthz`: liveness, no token.
 - `GET /metrics`: Prometheus metrics when `GOCACHED_METRICS_PULL=1`, no token.
 
@@ -191,12 +200,27 @@ The server does not terminate TLS. Put it behind a reverse proxy if traffic need
 
 | Metric                              | Labels |
 | ----------------------------------- | ------ |
-| `gocached_requests_total`           | `op` (`get`, `put`), `result` (`hit`, `miss`, `stored`, `rejected`, `error`) |
+| `gocached_requests_total`           | `op` (`get`, `put`); `result`: `hit`, `miss` on get, and `stored`, `skipped` (kind refused), `corrupt` (content does not match its output ID), `rejected` (other malformed requests), `error` on put; `kind` of a put object, empty for gets and when not yet known |
 | `gocached_bytes_total`              | `direction` (`sent`, `received`) |
 | `gocached_request_duration_seconds` | `op` |
-| `gocached_verify_failures_total`    | none |
 
 When neither pull nor push is enabled, no metrics are collected.
+
+## Entry kinds
+
+gocached recognizes what each uploaded object is from its first bytes:
+
+| Kind      | What it is |
+| --------- | ---------- |
+| `index`   | go's package or module index, a parsed summary of a source directory. Its key includes absolute paths and file modification times, so it almost never hits after a fresh checkout or on another machine. |
+| `archive` | A compiled package. |
+| `testlog` | The input log of a cached test result. |
+| `empty`   | A zero-size object, mostly compile output that printed nothing. |
+| `other`   | Everything else, such as test output and cgo or cover files. |
+
+`GOCACHED_SKIP_KINDS` takes a comma-separated list of kinds, `none` or `all`, and means the same on both sides: the client keeps those kinds local, and the server refuses them. The default `index` keeps package indexes off the server, since uploading them costs a request each and other machines cannot use them. They still hit locally. On the server, `all` stops all uploads without stopping gets. An unknown name makes `gocached` exit with an error at startup.
+
+Only uploads are classified: a get carries only the action ID, so lookups are counted as before. See `docs/adr/0004-entry-kinds-recognized-on-put-index-skipped-by-default.md` and `docs/research/go-cache-entry-kinds.md`.
 
 Pushes use replace semantics with the grouping key `job="gocached"`, `instance="<hostname>"`. Scrape the Pushgateway with `honor_labels: true` so these labels are kept:
 

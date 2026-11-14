@@ -41,7 +41,8 @@ var _ backend.Backend = (*Breaker)(nil)
 // New wraps next. Each Get must receive its response headers within timeout
 // (an unreachable or unresponsive server); reading the body is then bounded
 // by BodyTimeout instead. Put keeps the caller's deadline. After limit consecutive failures
-// (any error but backend.ErrMiss, from Get or Put) the breaker opens for good.
+// (any error but backend.ErrMiss or backend.ErrRejected, from Get or Put) the
+// breaker opens for good.
 func New(next backend.Backend, limit int, timeout time.Duration) *Breaker {
 	tripped, trip := context.WithCancel(context.Background())
 	return &Breaker{next: next, limit: int64(limit), timeout: timeout, tripped: tripped, trip: trip}
@@ -49,7 +50,7 @@ func New(next backend.Backend, limit int, timeout time.Duration) *Breaker {
 
 // record updates the failure count with the outcome of one call.
 func (b *Breaker) record(err error) {
-	if err == nil || errors.Is(err, backend.ErrMiss) {
+	if err == nil || errors.Is(err, backend.ErrMiss) || errors.Is(err, backend.ErrRejected) {
 		b.failures.Store(0)
 		return
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/client_golang/prometheus/push"
 
+	"github.com/yanang007/gocached/internal/kind"
 	"github.com/yanang007/gocached/internal/server"
 )
 
@@ -111,10 +112,9 @@ func startPush(cfg Config, reg *prometheus.Registry) func() {
 }
 
 type collectors struct {
-	requests       *prometheus.CounterVec
-	bytes          *prometheus.CounterVec
-	duration       *prometheus.HistogramVec
-	verifyFailures prometheus.Counter
+	requests *prometheus.CounterVec
+	bytes    *prometheus.CounterVec
+	duration *prometheus.HistogramVec
 }
 
 func newCollectors(reg prometheus.Registerer) *collectors {
@@ -122,8 +122,8 @@ func newCollectors(reg prometheus.Registerer) *collectors {
 	return &collectors{
 		requests: f.NewCounterVec(prometheus.CounterOpts{
 			Name: "gocached_requests_total",
-			Help: "Cache API requests by op (get/put) and result (hit/miss/stored/rejected/error).",
-		}, []string{"op", "result"}),
+			Help: "Cache API requests by op (get/put), result (hit/miss on get; stored/skipped/corrupt/rejected/error on put) and the kind of a put object (empty when unknown).",
+		}, []string{"op", "result", "kind"}),
 		bytes: f.NewCounterVec(prometheus.CounterOpts{
 			Name: "gocached_bytes_total",
 			Help: "Object bytes transferred by direction (sent on get, received on put).",
@@ -133,10 +133,6 @@ func newCollectors(reg prometheus.Registerer) *collectors {
 			Help:    "Cache API request duration by op.",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"op"}),
-		verifyFailures: f.NewCounter(prometheus.CounterOpts{
-			Name: "gocached_verify_failures_total",
-			Help: "Uploads rejected because their content did not match the output ID.",
-		}),
 	}
 }
 
@@ -159,14 +155,21 @@ func (m *collectors) instrument(next http.Handler) http.Handler {
 		start := time.Now()
 		body := &countingBody{ReadCloser: r.Body}
 		r.Body = body
+		var k kind.Kind
+		corrupt := false
 		if op == "put" {
-			r = r.WithContext(server.OnVerifyFailure(r.Context(), m.verifyFailures.Inc))
+			ctx := server.OnVerifyFailure(r.Context(), func() { corrupt = true })
+			r = r.WithContext(server.OnPutKind(ctx, func(got kind.Kind) { k = got }))
 		}
 		rw := &countingWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rw, r)
 
 		m.duration.WithLabelValues(op).Observe(time.Since(start).Seconds())
-		m.requests.WithLabelValues(op, result(op, rw.status)).Inc()
+		res := result(op, rw.status)
+		if corrupt {
+			res = "corrupt"
+		}
+		m.requests.WithLabelValues(op, res, string(k)).Inc()
 		if op == "get" && rw.status == http.StatusOK {
 			m.bytes.WithLabelValues("sent").Add(float64(rw.n))
 		}
@@ -184,6 +187,8 @@ func result(op string, status int) string {
 		return "miss"
 	case op == "put" && status/100 == 2:
 		return "stored"
+	case op == "put" && status == http.StatusUnsupportedMediaType:
+		return "skipped"
 	case op == "put" && status == http.StatusBadRequest:
 		return "rejected"
 	}

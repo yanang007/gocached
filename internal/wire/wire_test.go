@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/yanang007/gocached/backend"
+	"github.com/yanang007/gocached/internal/kind"
 	"github.com/yanang007/gocached/internal/wire"
 )
 
@@ -332,5 +333,57 @@ func TestGetUnknownIsMiss(t *testing.T) {
 	srv := newMemServer(t)
 	if _, _, err := get(t, srv.Client(), srv.URL, actionID("unknown")); !errors.Is(err, backend.ErrMiss) {
 		t.Fatalf("want backend.ErrMiss, got %v", err)
+	}
+}
+
+func TestKindIsDeclaredAndRejectionsAreTyped(t *testing.T) {
+	var declared string
+	mux := http.NewServeMux()
+	mux.HandleFunc(wire.RoutePut, func(w http.ResponseWriter, r *http.Request) {
+		_, obj, err := wire.ParsePut(r)
+		if err != nil {
+			wire.WriteError(w, err)
+			return
+		}
+		declared = string(obj.Kind)
+		wire.WriteRejected(w, obj.Kind)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	obj := object("go index v2\n")
+	obj.Kind = kind.Index
+	err := put(t, srv.Client(), srv.URL, actionID("k"), obj, strings.NewReader("go index v2\n"))
+	var rej *backend.RejectedError
+	if !errors.As(err, &rej) || rej.Kind != kind.Index || !errors.Is(err, backend.ErrRejected) {
+		t.Fatalf("err = %v, want a RejectedError for index", err)
+	}
+	if declared != "index" {
+		t.Fatalf("server saw kind %q", declared)
+	}
+}
+
+func TestUnknownOrMissingKindParsesAsUndeclared(t *testing.T) {
+	for _, q := range []string{"", "?kind=", "?kind=future", "?kind=INDEX"} {
+		r := httptest.NewRequest(http.MethodPut, "/cache/"+strings.Repeat("ab", 32)+q, strings.NewReader("x"))
+		r.SetPathValue("actionID", strings.Repeat("ab", 32))
+		r.Header.Set(wire.HeaderOutputID, strings.Repeat("cd", 32))
+		_, obj, err := wire.ParsePut(r)
+		if err != nil || obj.Kind != "" {
+			t.Errorf("query %q: kind %q, err %v; want undeclared", q, obj.Kind, err)
+		}
+	}
+}
+
+func TestPlain415IsAFailureNotARejection(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc(wire.RoutePut, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusUnsupportedMediaType)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	err := put(t, srv.Client(), srv.URL, actionID("p"), object("x"), strings.NewReader("x"))
+	if err == nil || errors.Is(err, backend.ErrRejected) {
+		t.Fatalf("a 415 without %s should be a plain failure, got %v", wire.HeaderRejectedKind, err)
 	}
 }

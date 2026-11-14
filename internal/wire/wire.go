@@ -2,7 +2,11 @@
 // server (internal/server) and the client (backend/remote).
 //
 //	GET /cache/{actionID hex}  200 with the output as body, or 404 on miss
-//	PUT /cache/{actionID hex}  output as body, Content-Length set; 204
+//	PUT /cache/{actionID hex}  output as body, Content-Length set; 204,
+//	                           or 415 when the server does not accept its kind
+//
+// A PUT may declare the object's kind in the QueryKind parameter. A 415
+// names the refused kind in HeaderRejectedKind.
 //
 // Object metadata travels in headers: HeaderOutputID (hex) on a PUT request
 // and a GET response, Content-Length as the size, and HeaderTime (unix
@@ -17,11 +21,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/yanang007/gocached/backend"
+	"github.com/yanang007/gocached/internal/kind"
 )
 
 // Routes, as net/http ServeMux patterns.
@@ -34,7 +40,13 @@ const (
 const (
 	HeaderOutputID = "X-Gocached-Output-Id"
 	HeaderTime     = "X-Gocached-Time"
+
+	// HeaderRejectedKind names the kind a 415 PUT response refused.
+	HeaderRejectedKind = "Gocached-Rejected-Kind"
 )
+
+// QueryKind is the PUT query parameter declaring the object's kind.
+const QueryKind = "kind"
 
 const pathPrefix = "/cache/"
 
@@ -66,7 +78,9 @@ func ParseGet(r *http.Request) ([]byte, error) { return actionIDOf(r) }
 
 // ParsePut returns the action ID and object metadata of a request routed by
 // RoutePut. The object's size is the request's ContentLength, which must be
-// known; its Time is zero. The body is left unread in r.Body.
+// known; its Time is zero. Its Kind is the declared kind, or empty when the
+// request declares none or a kind this build does not know. The body is left
+// unread in r.Body.
 func ParsePut(r *http.Request) ([]byte, backend.Object, error) {
 	actionID, err := actionIDOf(r)
 	if err != nil {
@@ -79,7 +93,17 @@ func ParsePut(r *http.Request) ([]byte, backend.Object, error) {
 	if r.ContentLength < 0 {
 		return nil, backend.Object{}, &RequestError{http.StatusLengthRequired, "Content-Length required"}
 	}
-	return actionID, backend.Object{OutputID: outputID, Size: r.ContentLength}, nil
+	k := kind.Kind(r.URL.Query().Get(QueryKind))
+	if !k.Known() {
+		k = ""
+	}
+	return actionID, backend.Object{OutputID: outputID, Size: r.ContentLength, Kind: k}, nil
+}
+
+// WriteRejected answers a PUT whose kind the server does not accept.
+func WriteRejected(w http.ResponseWriter, k kind.Kind) {
+	w.Header().Set(HeaderRejectedKind, string(k))
+	http.Error(w, fmt.Sprintf("kind %q not accepted by this server", string(k)), http.StatusUnsupportedMediaType)
 }
 
 // WriteError answers a request that ParseGet or ParsePut rejected.
@@ -116,8 +140,13 @@ func NewGetRequest(ctx context.Context, baseURL string, actionID []byte) (*http.
 
 // NewPutRequest builds a PUT storing body as the output of actionID. The
 // request's ContentLength is obj.Size, so body streams with a known length.
+// A non-empty obj.Kind is declared in QueryKind.
 func NewPutRequest(ctx context.Context, baseURL string, actionID []byte, obj backend.Object, body io.Reader) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, URL(baseURL, actionID), body)
+	u := URL(baseURL, actionID)
+	if obj.Kind != "" {
+		u += "?" + QueryKind + "=" + url.QueryEscape(string(obj.Kind))
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, body)
 	if err != nil {
 		return nil, err
 	}
@@ -167,10 +196,14 @@ func parseObject(resp *http.Response) (backend.Object, error) {
 }
 
 // ReadPutResponse drains and closes the response to a PUT and reports any
-// non-2xx status as an error.
+// non-2xx status as an error. A 415 naming a kind is a
+// *backend.RejectedError.
 func ReadPutResponse(resp *http.Response) error {
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
+	if k := resp.Header.Get(HeaderRejectedKind); resp.StatusCode == http.StatusUnsupportedMediaType && k != "" {
+		return &backend.RejectedError{Kind: kind.Kind(k)}
+	}
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("wire: PUT status %s", resp.Status)
 	}

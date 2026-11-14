@@ -18,6 +18,7 @@ import (
 	"github.com/yanang007/gocached/backend"
 	"github.com/yanang007/gocached/backend/gocache"
 	"github.com/yanang007/gocached/chain"
+	"github.com/yanang007/gocached/internal/kind"
 	"github.com/yanang007/gocached/internal/prog"
 )
 
@@ -145,7 +146,9 @@ func (s *session) put(body string) int64 {
 	actionID := sha256.Sum256([]byte(fmt.Sprint("action", s.nextID)))
 	outputID := sha256.Sum256([]byte(body))
 	s.send(map[string]any{"ID": s.nextID, "Command": "put", "ActionID": actionID[:], "OutputID": outputID[:], "BodySize": len(body)})
-	s.send([]byte(body))
+	if body != "" { // go sends no body line for an empty output
+		s.send([]byte(body))
+	}
 	return s.nextID
 }
 
@@ -252,5 +255,105 @@ func TestFailedUploadIsCountedAndPutSucceeds(t *testing.T) {
 	stats := s.close()
 	if stats["upload_ok"] != "0" || stats["upload_fail"] != "1" {
 		t.Fatalf("failed upload should be counted, got %v", stats)
+	}
+}
+
+// kindRemote stores nothing and rejects every put of a kind in refuse, the
+// way a server with GOCACHED_SKIP_KINDS answers. It records each put's
+// declared kind.
+type kindRemote struct {
+	refuse kind.Set
+	mu     sync.Mutex
+	puts   []kind.Kind
+}
+
+func (r *kindRemote) Get(context.Context, []byte) (backend.Object, io.ReadCloser, error) {
+	return backend.Object{}, nil, backend.ErrMiss
+}
+
+func (r *kindRemote) Put(_ context.Context, _ []byte, obj backend.Object, body io.Reader) error {
+	io.Copy(io.Discard, body)
+	r.mu.Lock()
+	r.puts = append(r.puts, obj.Kind)
+	r.mu.Unlock()
+	if r.refuse.Has(obj.Kind) {
+		return &backend.RejectedError{Kind: obj.Kind}
+	}
+	return nil
+}
+
+func (r *kindRemote) uploaded() []kind.Kind {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]kind.Kind(nil), r.puts...)
+}
+
+const indexBody = "go index v2\n\x00\x00\x00\x00"
+
+func TestSkippedKindIsStoredLocallyButNotUploaded(t *testing.T) {
+	remote := &kindRemote{}
+	skip, _ := kind.Parse("index")
+	s := start(t, prog.Options{Chain: newChain(t, remote), Skip: skip})
+
+	id := s.put(indexBody)
+	if r := s.read(); r.ID != id || r.Err != "" || r.DiskPath == "" {
+		t.Fatalf("a skipped kind should still be stored locally, got %+v", r)
+	}
+	s.put("!<arch>\npackage data")
+	s.read()
+	s.put("")
+	s.read()
+
+	stats := s.close()
+	if stats["put"] != "3" || stats["skip"] != "1" || stats["upload_ok"] != "2" || stats["rejected"] != "0" {
+		t.Fatalf("index should be skipped, the rest uploaded, got %v", stats)
+	}
+	if got := stats["kinds"]; got != "index:1/1,archive:1/0,empty:1/0" {
+		t.Fatalf("kinds = %q", got)
+	}
+	got := remote.uploaded()
+	if len(got) != 2 || got[0] != kind.Archive || got[1] != kind.Empty {
+		t.Fatalf("uploads should declare their kinds, got %v", got)
+	}
+}
+
+func TestRejectedKindIsNotUploadedAgain(t *testing.T) {
+	refuse, _ := kind.Parse("index")
+	remote := &kindRemote{refuse: refuse}
+	s := start(t, prog.Options{Chain: newChain(t, remote)}) // client skips nothing
+
+	s.put(indexBody)
+	s.read()
+	// Let the upload finish before the next put, so the rejection is known.
+	deadline := time.Now().Add(5 * time.Second)
+	for len(remote.uploaded()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+	s.put(indexBody + "x")
+	s.read()
+	s.put("other content")
+	s.read()
+
+	stats := s.close()
+	if stats["skip"] != "2" || stats["rejected"] != "1" || stats["upload_fail"] != "0" || stats["upload_ok"] != "1" {
+		t.Fatalf("one rejection, then the kind is skipped; got %v", stats)
+	}
+	if n := len(remote.uploaded()); n != 2 {
+		t.Fatalf("the second index should not reach the remote, got %d uploads", n)
+	}
+}
+
+func TestWithoutRemoteNothingIsSkipped(t *testing.T) {
+	skip, _ := kind.Parse("all")
+	local, err := gocache.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := start(t, prog.Options{Chain: chain.New(local), Skip: skip})
+	s.put(indexBody)
+	s.read()
+	if stats := s.close(); stats["skip"] != "0" || stats["kinds"] != "index:1/0" {
+		t.Fatalf("with no remote there is nothing to skip, got %v", stats)
 	}
 }

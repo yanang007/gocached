@@ -88,6 +88,7 @@ func goBuild(t *testing.T, cacheDir, out string, extraEnv ...string) string {
 		"GOCACHED_DIR="+cacheDir,
 		"GOCACHED_SHARE=",
 		"GOCACHED_QUIET=",
+		"GOCACHED_SKIP_KINDS=none", // upload everything unless a test says otherwise
 		"GOFLAGS=",
 		"GOWORK=off",
 	)
@@ -155,6 +156,7 @@ func runServe(t *testing.T, dir string, extraEnv ...string) (url, startupLog str
 		"GOCACHED_SHARE=",
 		"GOCACHED_ADDR=127.0.0.1:0",
 		"GOCACHED_TOKEN=",
+		"GOCACHED_SKIP_KINDS=none", // store everything unless a test says otherwise
 	)
 	cmd.Env = append(cmd.Env, extraEnv...)
 	stderr, err := cmd.StderrPipe()

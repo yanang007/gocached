@@ -17,6 +17,7 @@ import (
 
 	"github.com/yanang007/gocached/backend/gocache"
 	"github.com/yanang007/gocached/chain"
+	"github.com/yanang007/gocached/internal/kind"
 	"github.com/yanang007/gocached/internal/metrics"
 	"github.com/yanang007/gocached/internal/server"
 	"github.com/yanang007/gocached/internal/wire"
@@ -69,7 +70,7 @@ func status(t *testing.T, method, url string) int {
 	return resp.StatusCode
 }
 
-// exercise performs: 1 stored put (12 bytes), 1 rejected put (8 bytes,
+// exercise performs: 1 stored put (12 bytes), 1 corrupt put (8 bytes,
 // sha256 mismatch), 1 get hit (12 bytes), 1 get miss.
 func exercise(t *testing.T, srv *httptest.Server) {
 	t.Helper()
@@ -94,13 +95,12 @@ func exercise(t *testing.T, srv *httptest.Server) {
 
 // wantSeries are the series exercise must produce, in Prometheus text format.
 var wantSeries = []string{
-	`gocached_requests_total{op="get",result="hit"} 1`,
-	`gocached_requests_total{op="get",result="miss"} 1`,
-	`gocached_requests_total{op="put",result="stored"} 1`,
-	`gocached_requests_total{op="put",result="rejected"} 1`,
+	`gocached_requests_total{kind="",op="get",result="hit"} 1`,
+	`gocached_requests_total{kind="",op="get",result="miss"} 1`,
+	`gocached_requests_total{kind="other",op="put",result="stored"} 1`,
+	`gocached_requests_total{kind="other",op="put",result="corrupt"} 1`,
 	`gocached_bytes_total{direction="sent"} 12`,
 	`gocached_bytes_total{direction="received"} 20`,
-	`gocached_verify_failures_total 1`,
 	`gocached_request_duration_seconds_count{op="get"} 2`,
 	`gocached_request_duration_seconds_count{op="put"} 2`,
 }
@@ -157,10 +157,12 @@ func TestLocalWriteFailureIs500AndNotAVerifyFailure(t *testing.T) {
 
 	_, body := do(t, http.MethodGet, srv.URL+"/metrics", nil, "")
 	assertContains(t, body, []string{
-		`gocached_requests_total{op="put",result="error"} 1`,
-		`gocached_requests_total{op="put",result="rejected"} 1`,
-		`gocached_verify_failures_total 0`,
+		`gocached_requests_total{kind="other",op="put",result="error"} 1`,
+		`gocached_requests_total{kind="",op="put",result="rejected"} 1`,
 	})
+	if strings.Contains(body, `result="corrupt"`) {
+		t.Errorf("neither failure is a verify failure:\n%s", body)
+	}
 }
 
 func TestBrokenUploadIsRejectedButNotAVerifyFailure(t *testing.T) {
@@ -179,14 +181,16 @@ func TestBrokenUploadIsRejectedButNotAVerifyFailure(t *testing.T) {
 
 	// The handler may still be recording after the connection closed.
 	want := []string{
-		`gocached_requests_total{op="put",result="rejected"} 1`,
-		`gocached_verify_failures_total 0`,
+		`gocached_requests_total{kind="",op="put",result="rejected"} 1`,
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		_, body := do(t, http.MethodGet, srv.URL+"/metrics", nil, "")
 		if strings.Contains(body, want[0]) || time.Now().After(deadline) {
 			assertContains(t, body, want)
+			if strings.Contains(body, `result="corrupt"`) {
+				t.Errorf("a broken upload is not a verify failure:\n%s", body)
+			}
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -286,7 +290,7 @@ func TestPushPeriodicallyAndOnStop(t *testing.T) {
 	exercise(t, srv)
 	stop()
 	// stop returns only after the final push, which carries the metrics.
-	if last := drain(t, pushes); !strings.Contains(last.body, "gocached_verify_failures_total") {
+	if last := drain(t, pushes); !strings.Contains(last.body, "corrupt") {
 		t.Fatalf("final push lacks metrics: %q", last.body)
 	}
 	select {
@@ -327,4 +331,38 @@ func TestPushFailureDoesNotAffectCache(t *testing.T) {
 		t.Fatalf("/healthz status = %d", code)
 	}
 	stop()
+}
+
+func TestPutKindsAreCountedAndSkipsAreNotRejections(t *testing.T) {
+	cache, err := gocache.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	skip, _ := kind.Parse("index")
+	h, stop := metrics.Start(metrics.Config{Pull: true}, server.New(chain.New(cache), server.WithSkipKinds(skip)))
+	srv := httptest.NewServer(h)
+	t.Cleanup(func() { srv.Close(); stop() })
+
+	index := "go index v2\nbody"
+	resp, _ := do(t, http.MethodPut, srv.URL+"/cache/"+actionID("i"), map[string]string{wire.HeaderOutputID: sumHex(index)}, index)
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		t.Fatalf("index put status = %d, want 415", resp.StatusCode)
+	}
+	resp, _ = do(t, http.MethodPut, srv.URL+"/cache/"+actionID("a")+"?kind=archive", map[string]string{wire.HeaderOutputID: sumHex("!<arch>\n")}, "!<arch>\n")
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("archive put status = %d", resp.StatusCode)
+	}
+	resp, _ = do(t, http.MethodPut, srv.URL+"/cache/"+actionID("d")+"?kind=index", map[string]string{wire.HeaderOutputID: sumHex("x")}, "x")
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		t.Fatalf("declared index put status = %d, want 415", resp.StatusCode)
+	}
+
+	_, body := do(t, http.MethodGet, srv.URL+"/metrics", nil, "")
+	assertContains(t, body, []string{
+		`gocached_requests_total{kind="index",op="put",result="skipped"} 2`,
+		`gocached_requests_total{kind="archive",op="put",result="stored"} 1`,
+	})
+	if strings.Contains(body, `result="rejected"`) {
+		t.Errorf("a skipped kind must not count as rejected:\n%s", body)
+	}
 }

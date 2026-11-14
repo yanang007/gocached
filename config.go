@@ -11,6 +11,7 @@ import (
 	"github.com/caarlos0/env/v11"
 
 	"github.com/yanang007/gocached/internal/gocachedir"
+	"github.com/yanang007/gocached/internal/kind"
 	"github.com/yanang007/gocached/internal/metrics"
 	"github.com/yanang007/gocached/internal/prog"
 )
@@ -41,6 +42,7 @@ type progConfig struct {
 	RemoteTimeout duration `env:"GOCACHED_TIMEOUT" envDefault:"2s"`
 	DrainTimeout  duration `env:"GOCACHED_DRAIN_TIMEOUT"`
 	Quiet         flag     `env:"GOCACHED_QUIET"`
+	SkipKinds     kind.Set `env:"GOCACHED_SKIP_KINDS" envDefault:"index"` // not uploaded
 }
 
 func progConfigFromEnv() (progConfig, error) {
@@ -59,6 +61,7 @@ type serveConfig struct {
 	MetricsPull  flag     `env:"GOCACHED_METRICS_PULL"`
 	Pushgateway  string   `env:"GOCACHED_PUSHGATEWAY"`
 	PushInterval duration `env:"GOCACHED_PUSH_INTERVAL"`
+	SkipKinds    kind.Set `env:"GOCACHED_SKIP_KINDS" envDefault:"index"` // refused on put
 }
 
 func serveConfigFromEnv() (serveConfig, error) {

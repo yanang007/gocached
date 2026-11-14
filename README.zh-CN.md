@@ -12,9 +12,12 @@
 ## 前提条件与跨机器命中
 
 - 客户端需要 **Go 1.24 及以上**（`GOCACHEPROG` 从 Go 1.24 起正式可用）。
-- **所有机器使用同一个 Go 版本。** go 用作缓存键的 action ID 包含 Go 版本、GOOS/GOARCH、构建参数和环境，只有这些一致时，runner 和服务端主机之间才能互相命中。
-- **使用 `-trimpath` 构建，或固定工作路径。** 不加 `-trimpath` 时，go 会把源码目录哈希进主模块各包的 action ID，换一个目录检出代码，这些包就会 miss（标准库和依赖仍然命中）。加上 `-trimpath` 后，同一模块从不同路径构建会共享 compile 和 link 条目。可以用 `GOFLAGS=-trimpath` 对所有命令统一设置。
+- **使用相同的 Go 版本。** go 用作缓存 key 的 action ID 包含 Go 版本、GOOS/GOARCH、构建参数和环境变量。只有这些一致时，各 runner 之间以及 runner 与服务端主机之间才能互相命中。
+- **使用 `GOFLAGS=-trimpath`。** 不加 `-trimpath` 时，编译缓存的 key 包含包的源码目录，代码检出到不同目录就会 miss。标准库不受影响，依赖模块只有在模块缓存路径相同时才能命中。加上 `-trimpath` 后，key 中不再包含目录路径，同一模块在不同工作目录下的构建可以互相命中。
+- **CI 环境使用 `GODEBUG=goindex=0`。**[^goindex] 包索引缓存用于在同一台机器上跳过未变化目录的重复解析，CI 每次重新检出代码，这部分缓存几乎不会命中。关闭后不影响构建结果，编译好的包仍然来自缓存，同时省去每个索引向服务端的一次查询。
 - **使用固定的 `-o` 路径。** go 会把 `-o` 输出路径哈希进一个 action ID，所以 `go build -o /tmp/job-1234/app` 和 `go build -o /tmp/job-5678/app` 在这一步会 miss。请使用稳定的路径，例如相对检出目录的 `-o bin/app`。
+
+[^goindex]: `goindex` 是未公开文档的设置：源码以 `godebug.New("#goindex")` 声明（[go1.25.7](https://github.com/golang/go/blob/go1.25.7/src/cmd/go/internal/modindex/read.go#L37)），`#` 前缀表示该设置未公开。Go 维护者在 golang/go#69179 中[表示](https://github.com/golang/go/issues/69179#issuecomment-2361218222)关闭索引不应导致正确性问题。详见 `docs/research/go-cache-entry-kinds.md`。
 
 ## 客户端
 
@@ -48,6 +51,7 @@ export GOCACHEPROG="gocached prog"
 export GOCACHED_URL=http://cache.intranet:8080
 export GOCACHED_TOKEN=...          # 服务端要求 token 时设置
 export GOFLAGS=-trimpath
+export GODEBUG="${GODEBUG:+$GODEBUG,}goindex=0"   # CI 中建议设置，见上文
 
 go build -o bin/app ./cmd/app     # 构建命令不用改
 ```
@@ -55,8 +59,10 @@ go build -o bin/app ./cmd/app     # 构建命令不用改
 每个 go 命令结束时，`gocached prog` 会向 stderr 输出一行统计：
 
 ```
-gocached: get=812 hit_local=3 hit_remote=790 miss=19 put=19 upload_ok=19 upload_fail=0 drain=41ms
+gocached: get=812 hit_local=3 hit_remote=790 miss=19 put=19 upload_ok=12 upload_fail=0 skip=7 rejected=0 drain=41ms kinds=index:7/7,archive:6/0,empty:6/0
 ```
+
+`skip` 统计因类型而只保存在本地、没有上传的对象（见[缓存条目类型](#缓存条目类型)），`rejected` 是其中被服务端拒绝的部分。`kinds=` 按类型列出 put 的对象数和其中被跳过的数量。
 
 在全新的 runner 上，`hit_remote` 接近 `get` 说明缓存生效。如果各 runner 的 `miss` 都很高，通常是 Go 版本、构建参数、工作路径或 `-o` 路径不一致（见上文）。
 
@@ -72,6 +78,7 @@ gocached: get=812 hit_local=3 hit_remote=790 miss=19 put=19 upload_ok=19 upload_
 | `GOCACHED_TIMEOUT`       | `2s`                        | 远端 get 超时：等待服务端响应头的时间。读取响应体另有上限（30s）。 |
 | `GOCACHED_DRAIN_TIMEOUT` | `60s`                       | go 命令结束时，等待未完成上传的时间。 |
 | `GOCACHED_QUIET`         | 未设置                      | 设为 `1` 时不输出统计行。 |
+| `GOCACHED_SKIP_KINDS`    | `index`                     | 只保存在本地、不上传的条目类型（见[缓存条目类型](#缓存条目类型)）。 |
 
 ### 共享模式
 
@@ -107,6 +114,7 @@ GOCACHE=/path/to/cache go build std
 - **查询：** 远端 get 失败，或在 `GOCACHED_TIMEOUT` 内没有开始响应，按 miss 处理，由 go 自己编译。连续 3 次远端失败后，本次 go 命令的剩余时间里客户端不再访问服务端。下一个 go 命令会启动新的客户端，重新尝试。
 - **校验：** 下载内容按 sha256 output ID 校验，损坏的对象按 miss 处理。
 - **上传：** go 编译出的对象先写入本地目录，go 立即继续。上传在后台进行，最多同时 4 个，每个限时 30s。已有 4 个在进行时，下一个等待空位。上传失败计入 `upload_fail`，不会导致构建失败。
+- **被拒绝的类型：** 服务端不接受某个类型时返回 `415`。客户端将其计入 `skip` 和 `rejected`，不计入 `upload_fail`，也不会因此熔断，并在本次 go 命令的剩余时间里不再上传该类型。
 - **go 命令结束：** 客户端最多等待 `GOCACHED_DRAIN_TIMEOUT`（60s）让未完成的上传结束（统计行中的 `drain=`），超时后丢弃剩余上传。
 
 ## 服务端
@@ -178,12 +186,13 @@ go build std
 | `GOCACHED_METRICS_PULL`  | 未设置                                    | 设为 `1` 时在 `/metrics` 提供 Prometheus 指标。 |
 | `GOCACHED_PUSHGATEWAY`   | 未设置                                    | Pushgateway 地址。设置后定期推送指标，退出时再推送一次。 |
 | `GOCACHED_PUSH_INTERVAL` | `15s`                                     | 推送间隔。 |
+| `GOCACHED_SKIP_KINDS`    | `index`                                   | 上传时以 `415` 拒绝的条目类型（见[缓存条目类型](#缓存条目类型)）。不影响 get。 |
 
 服务端不处理 TLS。需要加密传输时，请在前面加反向代理。
 
 ### 接口
 
-- `GET /cache/{actionID}` 和 `PUT /cache/{actionID}`：缓存接口（设置了 `GOCACHED_TOKEN` 时需要 token）。上传内容与 output ID 不符，或 ID、请求头格式错误时返回 `400`；服务端写入失败（磁盘满、权限问题）返回 `500`。
+- `GET /cache/{actionID}` 和 `PUT /cache/{actionID}`：缓存接口（设置了 `GOCACHED_TOKEN` 时需要 token）。`PUT` 可以用 `?kind=<类型>` 声明类型；服务端跳过的类型以 `415` 拒绝，并带 `Gocached-Rejected-Kind` 响应头。上传内容与 output ID 不符，或 ID、请求头格式错误时返回 `400`；服务端写入失败（磁盘满、权限问题）返回 `500`。
 - `GET /healthz`：存活检查，不需要 token。
 - `GET /metrics`：`GOCACHED_METRICS_PULL=1` 时提供 Prometheus 指标，不需要 token。
 
@@ -191,12 +200,27 @@ go build std
 
 | 指标                                | 标签 |
 | ----------------------------------- | ---- |
-| `gocached_requests_total`           | `op`（`get`、`put`），`result`（`hit`、`miss`、`stored`、`rejected`、`error`） |
+| `gocached_requests_total`           | `op`（`get`、`put`）；`result`：get 为 `hit`、`miss`，put 为 `stored`、`skipped`（类型被拒绝）、`corrupt`（内容与 output ID 不符）、`rejected`（其他格式错误的请求）、`error`；`kind` 为 put 对象的类型，get 及类型尚未确定时为空 |
 | `gocached_bytes_total`              | `direction`（`sent`、`received`） |
 | `gocached_request_duration_seconds` | `op` |
-| `gocached_verify_failures_total`    | 无 |
 
 pull 和 push 都未开启时，不收集任何指标。
+
+## 缓存条目类型
+
+gocached 根据上传对象的开头字节识别它是什么：
+
+| 类型      | 含义 |
+| --------- | ---- |
+| `index`   | go 的包索引或模块索引，即源码目录的解析摘要。它的 key 包含绝对路径和文件修改时间，全新 checkout 后或在其他机器上几乎不会命中。 |
+| `archive` | 编译好的包。 |
+| `testlog` | 已缓存测试结果的输入日志。 |
+| `empty`   | 大小为 0 的对象，主要是没有输出的编译 stdout。 |
+| `other`   | 其他所有对象，例如测试输出、cgo 或 cover 生成的文件。 |
+
+`GOCACHED_SKIP_KINDS` 取逗号分隔的类型列表、`none` 或 `all`，在两端含义相同：客户端只在本地保存这些类型，服务端拒绝它们。默认值 `index` 让包索引不进入服务端：每个索引上传都要一次请求，其他机器却用不上。它们在本地照常命中。服务端设为 `all` 时停止接受所有上传，但 get 照常提供。类型名无效时，`gocached` 启动即报错退出。
+
+只有上传会被分类：get 只带 action ID，查询的统计方式不变。详见 `docs/adr/0004-entry-kinds-recognized-on-put-index-skipped-by-default.md` 和 `docs/research/go-cache-entry-kinds.md`。
 
 推送使用替换语义，grouping key 为 `job="gocached"`、`instance="<hostname>"`。抓取 Pushgateway 时请设置 `honor_labels: true`，以保留这些标签：
 

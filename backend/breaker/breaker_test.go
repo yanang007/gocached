@@ -236,3 +236,28 @@ func TestBodyReadFailuresTripBreaker(t *testing.T) {
 		t.Fatalf("server saw %d requests, want 3 (then the backend is skipped)", got)
 	}
 }
+
+// rejectingBackend refuses every put by kind.
+type rejectingBackend struct{ puts atomic.Int64 }
+
+func (r *rejectingBackend) Get(context.Context, []byte) (backend.Object, io.ReadCloser, error) {
+	return backend.Object{}, nil, backend.ErrMiss
+}
+
+func (r *rejectingBackend) Put(context.Context, []byte, backend.Object, io.Reader) error {
+	r.puts.Add(1)
+	return &backend.RejectedError{Kind: "index"}
+}
+
+func TestRejectionsDoNotTripBreaker(t *testing.T) {
+	next := &rejectingBackend{}
+	b := breaker.New(next, 3, time.Second)
+	for i := 0; i < 5; i++ {
+		if err := b.Put(context.Background(), actionID("r"), backend.Object{}, strings.NewReader("")); !errors.Is(err, backend.ErrRejected) {
+			t.Fatalf("put %d: %v, want the rejection passed through", i, err)
+		}
+	}
+	if n := next.puts.Load(); n != 5 {
+		t.Fatalf("breaker opened after rejections: only %d of 5 puts reached the backend", n)
+	}
+}

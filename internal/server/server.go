@@ -4,6 +4,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/yanang007/gocached/backend/gocache"
 	"github.com/yanang007/gocached/chain"
+	"github.com/yanang007/gocached/internal/kind"
 	"github.com/yanang007/gocached/internal/wire"
 )
 
@@ -39,9 +41,16 @@ func WithToken(token string) Option {
 	return func(s *server) { s.token = token }
 }
 
+// WithSkipKinds makes the server refuse PUTs of the kinds in skip with 415
+// (ADR 0004). Gets are not affected.
+func WithSkipKinds(skip kind.Set) Option {
+	return func(s *server) { s.skip = skip }
+}
+
 type server struct {
 	chain *chain.Chain
-	token string // empty means no authentication
+	token string   // empty means no authentication
+	skip  kind.Set // kinds refused on put
 }
 
 func (s *server) get(w http.ResponseWriter, r *http.Request) {
@@ -78,8 +87,26 @@ func (s *server) put(w http.ResponseWriter, r *http.Request) {
 		wire.WriteError(w, err)
 		return
 	}
+	// A declared kind is trusted for refusing without reading the body;
+	// otherwise the body's first bytes decide.
+	if obj.Kind != "" && s.skip.Has(obj.Kind) {
+		reportPutKind(r.Context(), obj.Kind)
+		wire.WriteRejected(w, obj.Kind)
+		return
+	}
 	body := &errBody{r: r.Body}
-	path, err := s.chain.Put(r.Context(), actionID, obj, body)
+	head := kind.NewHead(obj.Size)
+	if err := head.Fill(body); err != nil {
+		http.Error(w, "reading body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	obj.Kind = head.Kind()
+	reportPutKind(r.Context(), obj.Kind)
+	if s.skip.Has(obj.Kind) {
+		wire.WriteRejected(w, obj.Kind)
+		return
+	}
+	path, err := s.chain.Put(r.Context(), actionID, obj, io.MultiReader(bytes.NewReader(head.Bytes()), body))
 	if path == "" {
 		// The local write leaves nothing behind on failure.
 		switch {
@@ -118,6 +145,22 @@ func OnVerifyFailure(ctx context.Context, f func()) context.Context {
 func reportVerifyFailure(ctx context.Context) {
 	if f, ok := ctx.Value(verifyHookKey{}).(func()); ok {
 		f()
+	}
+}
+
+type putKindHookKey struct{}
+
+// OnPutKind returns a copy of ctx that makes the handler call f with the
+// kind of a PUT carried by a request with that context, once it is known:
+// the declared kind when the PUT is refused without reading its body,
+// otherwise the kind read from the body. Malformed PUTs do not call f.
+func OnPutKind(ctx context.Context, f func(kind.Kind)) context.Context {
+	return context.WithValue(ctx, putKindHookKey{}, f)
+}
+
+func reportPutKind(ctx context.Context, k kind.Kind) {
+	if f, ok := ctx.Value(putKindHookKey{}).(func(kind.Kind)); ok {
+		f(k)
 	}
 }
 

@@ -7,6 +7,10 @@
 //
 //	GOCACHED_DIR            cache dir; default <user cache dir>/gocached, or the
 //	                        host GOCACHE in shared mode
+//	GOCACHED_SKIP_KINDS     comma-separated entry kinds (index, archive, testlog,
+//	                        empty, other), or none or all; prog stores them
+//	                        locally but does not upload them, serve refuses to
+//	                        store them (default: index)
 //	GOCACHED_SHARE          set to 1 for shared mode: the cache dir is the host
 //	                        GOCACHE (GOCACHED_DIR, otherwise `go env GOCACHE`,
 //	                        otherwise $GOCACHE or <user cache dir>/go-build if
@@ -100,6 +104,7 @@ func runProg() error {
 	return prog.Run(context.Background(), os.Stdin, os.Stdout, os.Stderr, prog.Options{
 		Chain:        chain.New(cache, rest...),
 		Quiet:        bool(cfg.Quiet),
+		Skip:         cfg.SkipKinds,
 		DrainTimeout: time.Duration(cfg.DrainTimeout),
 	})
 }
@@ -124,6 +129,6 @@ func runServe() error {
 	if cfg.Token == "" {
 		log.Printf("gocached: WARNING: GOCACHED_TOKEN is not set; /cache/* accepts unauthenticated reads and writes")
 	}
-	log.Printf("gocached: serving %s, listening on http://%s", cache.Dir(), ln.Addr())
-	return serveWithMetrics(ln, m, server.New(chain.New(cache), server.WithToken(cfg.Token)))
+	log.Printf("gocached: serving %s, refusing kinds %s, listening on http://%s", cache.Dir(), cfg.SkipKinds, ln.Addr())
+	return serveWithMetrics(ln, m, server.New(chain.New(cache), server.WithToken(cfg.Token), server.WithSkipKinds(cfg.SkipKinds)))
 }
