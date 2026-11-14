@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -311,8 +312,10 @@ func TestSkippedKindIsStoredLocallyButNotUploaded(t *testing.T) {
 	if got := stats["kinds"]; got != "index:1/1,archive:1/0,empty:1/0" {
 		t.Fatalf("kinds = %q", got)
 	}
+	// Uploads run concurrently, so their order is not fixed.
 	got := remote.uploaded()
-	if len(got) != 2 || got[0] != kind.Archive || got[1] != kind.Empty {
+	slices.Sort(got)
+	if !slices.Equal(got, []kind.Kind{kind.Archive, kind.Empty}) {
 		t.Fatalf("uploads should declare their kinds, got %v", got)
 	}
 }
