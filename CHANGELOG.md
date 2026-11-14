@@ -5,7 +5,9 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - 2026-11-14
+
+Defaults and metrics change in ways that break compatibility with v0.2.0.
 
 ### Added
 
@@ -13,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `GOCACHED_SKIP_KINDS`, for both `prog` and `serve`: a comma-separated list of kinds, `none` or `all`. The client stores those kinds locally but does not upload them; the server refuses them with `415` and a `Gocached-Rejected-Kind` header. Gets are not affected.
 - Uploads declare their kind with `?kind=`. The server refuses a declared skipped kind without reading the body, and otherwise checks the body itself.
 - The client stats line gains `skip`, `rejected` and a per-kind `kinds=` field. A refused kind is not an upload failure, does not trip the breaker, and is not uploaded again in that go command.
-- README: `GODEBUG=goindex=0` as an optional client setting, with its source and caveats.
+- README: recommends `GODEBUG=goindex=0` in CI, with its source.
 
 ### Changed
 
@@ -44,6 +46,6 @@ Configuration changes break compatibility with v0.1.0.
 
 - Initial release: `gocached prog` GOCACHEPROG client and `gocached serve` HTTP cache server.
 
-[Unreleased]: https://github.com/yanang007/gocached/compare/v0.2.0...HEAD
+[0.3.0]: https://github.com/yanang007/gocached/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/yanang007/gocached/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/yanang007/gocached/releases/tag/v0.1.0
