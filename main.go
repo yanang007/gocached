@@ -11,6 +11,10 @@
 //	                        empty, other), or none or all; prog stores them
 //	                        locally but does not upload them, serve refuses to
 //	                        store them (default: index)
+//	GOCACHED_UPLOAD_BATCH_ITEMS  most objects per upload batch (default: 256);
+//	                        the server refuses larger batches with 413
+//	GOCACHED_UPLOAD_BATCH_BYTES  most content bytes per upload batch (default:
+//	                        4194304); a batch of one object may exceed it
 //	GOCACHED_SHARE          set to 1 for shared mode: the cache dir is the host
 //	                        GOCACHE (GOCACHED_DIR, otherwise `go env GOCACHE`,
 //	                        otherwise $GOCACHE or <user cache dir>/go-build if
@@ -27,6 +31,14 @@
 //	                        go command
 //	GOCACHED_DRAIN_TIMEOUT  how long close waits for pending uploads (default: 60s)
 //	GOCACHED_QUIET          set to 1 to silence the stats line printed on close
+//	GOCACHED_UPLOAD_SMALL_MAX     objects at least this many bytes are uploaded
+//	                        alone, not batched (default: 1048576)
+//	GOCACHED_UPLOAD_BATCH_DELAY   longest a put waits for its batch to fill
+//	                        (default: 10ms)
+//	GOCACHED_UPLOAD_CONCURRENCY   upload batches in flight (default: 4)
+//	GOCACHED_UPLOAD_BUFFER_BYTES  bytes queued for upload before puts block
+//	                        (default: 67108864)
+//	GOCACHED_UPLOAD_TIMEOUT       timeout of each upload batch (default: 30s)
 //
 // Environment for serve:
 //
@@ -37,8 +49,8 @@
 //	GOCACHED_PUSH_INTERVAL  push period (default: 15s)
 //
 // Durations are a Go duration ("500ms", "1m") or a plain number of seconds
-// ("1.5"). An invalid or non-positive duration makes gocached exit with an
-// error at startup.
+// ("1.5"). Counts and byte sizes are plain positive integers. An invalid or
+// non-positive value makes gocached exit with an error at startup.
 //
 // /healthz is always served and, like /metrics, needs no token. With neither
 // metrics mode set, no metrics are collected.
@@ -102,10 +114,12 @@ func runProg() error {
 		rest = append(rest, breaker.New(remote.New(cfg.URL, client), breakerMaxFailures, time.Duration(cfg.RemoteTimeout)))
 	}
 	return prog.Run(context.Background(), os.Stdin, os.Stdout, os.Stderr, prog.Options{
-		Chain:        chain.New(cache, rest...),
-		Quiet:        bool(cfg.Quiet),
-		Skip:         cfg.SkipKinds,
-		DrainTimeout: time.Duration(cfg.DrainTimeout),
+		Chain:         chain.New(cache, rest...),
+		Quiet:         bool(cfg.Quiet),
+		Skip:          cfg.SkipKinds,
+		DrainTimeout:  time.Duration(cfg.DrainTimeout),
+		Upload:        cfg.upload(),
+		UploadTimeout: time.Duration(cfg.UploadTimeout),
 	})
 }
 
@@ -130,5 +144,6 @@ func runServe() error {
 		log.Printf("gocached: WARNING: GOCACHED_TOKEN is not set; /cache/* accepts unauthenticated reads and writes")
 	}
 	log.Printf("gocached: serving %s, refusing kinds %s, listening on http://%s", cache.Dir(), cfg.SkipKinds, ln.Addr())
-	return serveWithMetrics(ln, m, server.New(chain.New(cache), server.WithToken(cfg.Token), server.WithSkipKinds(cfg.SkipKinds)))
+	return serveWithMetrics(ln, m, server.New(chain.New(cache), server.WithToken(cfg.Token), server.WithSkipKinds(cfg.SkipKinds),
+		server.WithBatchLimits(int(cfg.BatchItems), int64(cfg.BatchBytes))))
 }

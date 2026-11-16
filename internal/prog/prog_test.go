@@ -19,6 +19,7 @@ import (
 	"github.com/yanang007/gocached/backend"
 	"github.com/yanang007/gocached/backend/gocache"
 	"github.com/yanang007/gocached/chain"
+	"github.com/yanang007/gocached/internal/bundler"
 	"github.com/yanang007/gocached/internal/kind"
 	"github.com/yanang007/gocached/internal/prog"
 )
@@ -31,28 +32,46 @@ type blockingRemote struct {
 	active  sync.WaitGroup
 }
 
-func (b *blockingRemote) Get(context.Context, []byte) (backend.Object, io.ReadCloser, error) {
-	return backend.Object{}, nil, backend.ErrMiss
+func (b *blockingRemote) Get(_ context.Context, ids [][]byte) ([]backend.GetResult, error) {
+	return misses(ids), nil
 }
 
-func (b *blockingRemote) Put(_ context.Context, _ []byte, _ backend.Object, body io.Reader) error {
+func (b *blockingRemote) Put(_ context.Context, items []backend.PutItem) ([]error, error) {
 	b.active.Add(1)
 	defer b.active.Done()
-	io.Copy(io.Discard, body)
+	readAll(items)
 	b.started <- struct{}{}
 	<-b.release
-	return nil
+	return make([]error, len(items)), nil
+}
+
+func misses(ids [][]byte) []backend.GetResult {
+	res := make([]backend.GetResult, len(ids))
+	for i := range res {
+		res[i].Err = backend.ErrMiss
+	}
+	return res
+}
+
+// readAll reads and closes every item's content, like a remote sending it.
+func readAll(items []backend.PutItem) {
+	for _, it := range items {
+		if body, err := it.Open(); err == nil {
+			io.Copy(io.Discard, body)
+			body.Close()
+		}
+	}
 }
 
 // failingRemote rejects every put.
 type failingRemote struct{}
 
-func (failingRemote) Get(context.Context, []byte) (backend.Object, io.ReadCloser, error) {
-	return backend.Object{}, nil, backend.ErrMiss
+func (failingRemote) Get(_ context.Context, ids [][]byte) ([]backend.GetResult, error) {
+	return misses(ids), nil
 }
 
-func (failingRemote) Put(context.Context, []byte, backend.Object, io.Reader) error {
-	return errors.New("server unavailable")
+func (failingRemote) Put(context.Context, []backend.PutItem) ([]error, error) {
+	return nil, errors.New("server unavailable")
 }
 
 // session drives prog.Run over pipes the way go does.
@@ -266,21 +285,32 @@ type kindRemote struct {
 	refuse kind.Set
 	mu     sync.Mutex
 	puts   []kind.Kind
+	calls  int
 }
 
-func (r *kindRemote) Get(context.Context, []byte) (backend.Object, io.ReadCloser, error) {
-	return backend.Object{}, nil, backend.ErrMiss
+func (r *kindRemote) Get(_ context.Context, ids [][]byte) ([]backend.GetResult, error) {
+	return misses(ids), nil
 }
 
-func (r *kindRemote) Put(_ context.Context, _ []byte, obj backend.Object, body io.Reader) error {
-	io.Copy(io.Discard, body)
+func (r *kindRemote) Put(_ context.Context, items []backend.PutItem) ([]error, error) {
+	readAll(items)
 	r.mu.Lock()
-	r.puts = append(r.puts, obj.Kind)
-	r.mu.Unlock()
-	if r.refuse.Has(obj.Kind) {
-		return &backend.RejectedError{Kind: obj.Kind}
+	defer r.mu.Unlock()
+	r.calls++
+	errs := make([]error, len(items))
+	for i, it := range items {
+		r.puts = append(r.puts, it.Object.Kind)
+		if r.refuse.Has(it.Object.Kind) {
+			errs[i] = &backend.RejectedError{Kind: it.Object.Kind}
+		}
 	}
-	return nil
+	return errs, nil
+}
+
+func (r *kindRemote) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
 }
 
 func (r *kindRemote) uploaded() []kind.Kind {
@@ -358,5 +388,38 @@ func TestWithoutRemoteNothingIsSkipped(t *testing.T) {
 	s.read()
 	if stats := s.close(); stats["skip"] != "0" || stats["kinds"] != "index:1/0" {
 		t.Fatalf("with no remote there is nothing to skip, got %v", stats)
+	}
+}
+
+func TestManySmallPutsUploadInFewBatches(t *testing.T) {
+	remote := &kindRemote{}
+	s := start(t, prog.Options{Chain: newChain(t, remote), Upload: bundler.Options{MaxItems: 50, MaxDelay: time.Hour}})
+	for i := range 120 {
+		s.put(fmt.Sprint("object ", i))
+		s.read()
+	}
+	stats := s.close()
+	if stats["upload_ok"] != "120" || stats["upload_fail"] != "0" {
+		t.Fatalf("every put should upload, got %v", stats)
+	}
+	// 50 + 50 by count, then the rest when close flushes.
+	if n := remote.callCount(); n != 3 {
+		t.Fatalf("120 puts took %d upload requests, want 3", n)
+	}
+}
+
+func TestRejectionsWithinOneBatchAreAllSkips(t *testing.T) {
+	refuse, _ := kind.Parse("index")
+	remote := &kindRemote{refuse: refuse}
+	s := start(t, prog.Options{Chain: newChain(t, remote), Upload: bundler.Options{MaxDelay: time.Hour}})
+	s.put(indexBody)
+	s.read()
+	s.put(indexBody + "x")
+	s.read()
+	s.put("other content")
+	s.read()
+	stats := s.close()
+	if stats["skip"] != "2" || stats["rejected"] != "2" || stats["upload_ok"] != "1" || stats["upload_fail"] != "0" {
+		t.Fatalf("both indexes in the batch are refused, got %v", stats)
 	}
 }

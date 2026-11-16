@@ -63,22 +63,57 @@ func (c *Cache) GetFile(ctx context.Context, actionID []byte) (backend.Object, s
 	return backend.Object{OutputID: e.OutputID, Size: e.Size, Time: e.Time}, path, nil
 }
 
-// Get implements backend.Backend.
-func (c *Cache) Get(ctx context.Context, actionID []byte) (backend.Object, io.ReadCloser, error) {
-	obj, path, err := c.GetFile(ctx, actionID)
-	if err != nil {
-		return backend.Object{}, nil, err
+// Get implements backend.Backend. Each body is its own open file.
+func (c *Cache) Get(ctx context.Context, actionIDs [][]byte) ([]backend.GetResult, error) {
+	res := make([]backend.GetResult, len(actionIDs))
+	for i, id := range actionIDs {
+		obj, path, err := c.GetFile(ctx, id)
+		if err == nil {
+			var f *os.File
+			if f, err = os.Open(path); err != nil {
+				err = backend.ErrMiss
+			} else {
+				res[i] = backend.GetResult{Object: obj, Body: f}
+				continue
+			}
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			for _, r := range res[:i] {
+				r.Close()
+			}
+			return nil, ctxErr
+		}
+		res[i].Err = err
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return backend.Object{}, nil, backend.ErrMiss
-	}
-	return obj, f, nil
+	return res, nil
 }
 
-// Put implements backend.Backend. The body must hash to obj.OutputID and be
-// obj.Size bytes long. Existing targets are kept as they are.
-func (c *Cache) Put(ctx context.Context, actionID []byte, obj backend.Object, body io.Reader) error {
+// Put implements backend.Backend. Each body must hash to its
+// Object.OutputID and be Object.Size bytes long. Existing targets are kept
+// as they are.
+func (c *Cache) Put(ctx context.Context, items []backend.PutItem) ([]error, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	errs := make([]error, len(items))
+	for i, it := range items {
+		errs[i] = c.putOpened(ctx, it)
+	}
+	return errs, nil
+}
+
+func (c *Cache) putOpened(ctx context.Context, it backend.PutItem) error {
+	body, err := it.Open()
+	if err != nil {
+		return err
+	}
+	defer body.Close()
+	return c.PutReader(ctx, it.ActionID, it.Object, body)
+}
+
+// PutReader stores one object streamed from body, which must hash to
+// obj.OutputID and be obj.Size bytes long.
+func (c *Cache) PutReader(ctx context.Context, actionID []byte, obj backend.Object, body io.Reader) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"mime"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -248,9 +250,9 @@ func TestUnreachableServerCostsAtMostThreeTimeouts(t *testing.T) {
 }
 
 // tamperingProxy forwards requests to upstream and flips one byte of every
-// non-empty GET response body, keeping headers and length intact. Empty
-// bodies cannot be tampered with; the returned counter reports how many
-// such GET hits passed through untouched.
+// non-empty content part of a batch-get response, keeping headers and
+// lengths intact. Empty parts cannot be tampered with; the returned counter
+// reports how many such hits passed through untouched.
 func tamperingProxy(t *testing.T, upstream string) (string, *atomic.Int64) {
 	t.Helper()
 	var untouched atomic.Int64
@@ -268,19 +270,36 @@ func tamperingProxy(t *testing.T, upstream string) (string, *atomic.Int64) {
 			return
 		}
 		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
-		if r.Method == http.MethodGet && resp.StatusCode == http.StatusOK {
-			if len(body) > 0 {
-				body[len(body)/2] ^= 0xff
-			} else {
-				untouched.Add(1)
-			}
-		}
 		for k, v := range resp.Header {
 			w.Header()[k] = v
 		}
+		if r.URL.Path != "/cache/batch-get" || resp.StatusCode != http.StatusOK {
+			w.WriteHeader(resp.StatusCode)
+			io.Copy(w, resp.Body)
+			return
+		}
+		_, params, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+		mr := multipart.NewReader(resp.Body, params["boundary"])
+		mw := multipart.NewWriter(w)
+		mw.SetBoundary(params["boundary"])
 		w.WriteHeader(resp.StatusCode)
-		w.Write(body)
+		for first := true; ; first = false {
+			p, err := mr.NextRawPart()
+			if err != nil {
+				break
+			}
+			body, _ := io.ReadAll(p)
+			if !first { // the manifest stays intact
+				if len(body) > 0 {
+					body[len(body)/2] ^= 0xff
+				} else {
+					untouched.Add(1)
+				}
+			}
+			pw, _ := mw.CreatePart(p.Header)
+			pw.Write(body)
+		}
+		mw.Close()
 	}))
 	t.Cleanup(srv.Close)
 	return srv.URL, &untouched
@@ -348,12 +367,9 @@ func putProxy(t *testing.T, target string, onPut func(w http.ResponseWriter, r *
 func TestSlowUploadsDoNotBlockPutsAndDrainOnClose(t *testing.T) {
 	const delay = 300 * time.Millisecond
 	server := startServer(t)
-	var inFlight, maxInFlight atomic.Int64
+	var batches atomic.Int64
 	slow := putProxy(t, server, func(w http.ResponseWriter, r *http.Request, next http.Handler) {
-		n := inFlight.Add(1)
-		defer inFlight.Add(-1)
-		for m := maxInFlight.Load(); n > m && !maxInFlight.CompareAndSwap(m, n); m = maxInFlight.Load() {
-		}
+		batches.Add(1)
 		time.Sleep(delay)
 		next.ServeHTTP(w, r)
 	})
@@ -362,26 +378,19 @@ func TestSlowUploadsDoNotBlockPutsAndDrainOnClose(t *testing.T) {
 	start := time.Now()
 	a := parseStats(t, goBuild(t, t.TempDir(), out, "GOCACHED_URL="+slow))
 	elapsed := time.Since(start)
-	serial := time.Duration(a["put"]) * delay
-	t.Logf("build %v, drain %dms, serial uploads %v, max uploads in flight %d", elapsed, a["drain"], serial, maxInFlight.Load())
+	t.Logf("build %v, drain %dms, %d puts in %d upload batches", elapsed, a["drain"], a["put"], batches.Load())
 	// Close drains: every upload reached the server before prog exited.
 	if a["put"] == 0 || a["upload_ok"] != a["put"] || a["upload_fail"] != 0 {
 		t.Fatalf("client A should finish every upload before exiting, got %v", a)
 	}
-	// Puts hand uploads to the background pool and return, so slow uploads
-	// pile up at the server side by side.
-	if got := maxInFlight.Load(); got < 2 {
-		t.Fatalf("uploads never overlapped (max %d in flight); puts look blocked on uploads", got)
+	// Small puts share batches.
+	if n := batches.Load(); n == 0 || n >= int64(a["put"]) {
+		t.Fatalf("%d puts took %d upload requests, want fewer", a["put"], n)
 	}
 	// The last puts return before their slow uploads finish, so close has
 	// uploads left to wait for.
 	if a["drain"] == 0 {
 		t.Fatalf("close had no pending uploads to drain; puts look blocked on uploads, got %v", a)
-	}
-	// A forgiving backstop: a build that blocked each put on its upload
-	// would take at least serial.
-	if elapsed >= serial {
-		t.Fatalf("puts look blocked on uploads: build took %v, serial uploads take %v", elapsed, serial)
 	}
 
 	b := parseStats(t, goBuild(t, t.TempDir(), out, "GOCACHED_URL="+server))
@@ -391,18 +400,13 @@ func TestSlowUploadsDoNotBlockPutsAndDrainOnClose(t *testing.T) {
 }
 
 func TestHungUploadsAreDroppedAfterDrainTimeout(t *testing.T) {
-	const hung = 3 // fewer than the upload concurrency, so others still flow
 	release := make(chan struct{})
-	var puts atomic.Int64
-	stuck := putProxy(t, startServer(t), func(w http.ResponseWriter, r *http.Request, next http.Handler) {
-		if puts.Add(1) <= hung {
-			select { // hold until the client gives up on the request
-			case <-r.Context().Done():
-			case <-release:
-			}
-			return
+	// Every upload hangs; the batches still in flight at close are dropped.
+	stuck := putProxy(t, startServer(t), func(w http.ResponseWriter, r *http.Request, _ http.Handler) {
+		select { // hold until the client gives up on the request
+		case <-r.Context().Done():
+		case <-release:
 		}
-		next.ServeHTTP(w, r)
 	})
 	t.Cleanup(func() { close(release) }) // runs before the proxy shuts down
 
@@ -413,8 +417,8 @@ func TestHungUploadsAreDroppedAfterDrainTimeout(t *testing.T) {
 	if elapsed > 20*time.Second {
 		t.Fatalf("build took %v; hung uploads should neither block puts nor outlast the drain timeout", elapsed)
 	}
-	if s["upload_fail"] != hung || s["upload_ok"] != s["put"]-hung {
-		t.Fatalf("the %d hung uploads should be dropped and counted as failed, got %v", hung, s)
+	if s["put"] == 0 || s["upload_fail"] != s["put"] || s["upload_ok"] != 0 {
+		t.Fatalf("every hung upload should be dropped and counted as failed, got %v", s)
 	}
 	if d := s["drain"]; d < 1000 || d > 5000 {
 		t.Fatalf("drain should stop at about the 1s timeout, got %dms", d)
@@ -513,6 +517,10 @@ func TestInvalidDurationsFailFast(t *testing.T) {
 		{[]string{"prog"}, []string{"GOCACHED_DIR=" + t.TempDir(), "GOCACHED_URL=http://127.0.0.1:1", "GOCACHED_TIMEOUT=soon"}, "GOCACHED_TIMEOUT"},
 		{[]string{"prog"}, []string{"GOCACHED_DIR=" + t.TempDir(), "GOCACHED_DRAIN_TIMEOUT=-1s"}, "GOCACHED_DRAIN_TIMEOUT"},
 		{[]string{"serve"}, []string{"GOCACHED_DIR=" + gocacheDir(t), "GOCACHED_ADDR=127.0.0.1:0", "GOCACHED_PUSH_INTERVAL=0"}, "GOCACHED_PUSH_INTERVAL"},
+		{[]string{"prog"}, []string{"GOCACHED_DIR=" + t.TempDir(), "GOCACHED_UPLOAD_BATCH_BYTES=4MiB"}, "GOCACHED_UPLOAD_BATCH_BYTES"},
+		{[]string{"prog"}, []string{"GOCACHED_DIR=" + t.TempDir(), "GOCACHED_UPLOAD_CONCURRENCY=0"}, "GOCACHED_UPLOAD_CONCURRENCY"},
+		{[]string{"prog"}, []string{"GOCACHED_DIR=" + t.TempDir(), "GOCACHED_UPLOAD_BATCH_DELAY=never"}, "GOCACHED_UPLOAD_BATCH_DELAY"},
+		{[]string{"serve"}, []string{"GOCACHED_DIR=" + gocacheDir(t), "GOCACHED_ADDR=127.0.0.1:0", "GOCACHED_UPLOAD_BATCH_ITEMS=-3"}, "GOCACHED_UPLOAD_BATCH_ITEMS"},
 	} {
 		if out := runFailing(t, tc.args, tc.env...); !strings.Contains(out, tc.name) {
 			t.Errorf("gocached %v with a bad %s: output does not name it:\n%s", tc.args, tc.name, out)

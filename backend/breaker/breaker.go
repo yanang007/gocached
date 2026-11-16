@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -50,7 +51,9 @@ func New(next backend.Backend, limit int, timeout time.Duration) *Breaker {
 
 // record updates the failure count with the outcome of one call.
 func (b *Breaker) record(err error) {
-	if err == nil || errors.Is(err, backend.ErrMiss) || errors.Is(err, backend.ErrRejected) {
+	// Misses, refused kinds and oversized batches are answers from a
+	// working backend.
+	if err == nil || errors.Is(err, backend.ErrMiss) || errors.Is(err, backend.ErrRejected) || errors.Is(err, backend.ErrTooLarge) {
 		b.failures.Store(0)
 		return
 	}
@@ -68,70 +71,112 @@ func (b *Breaker) guard(ctx context.Context) (context.Context, func()) {
 	return ctx, func() { stop(); cancel() }
 }
 
-// Get implements backend.Backend.
-func (b *Breaker) Get(ctx context.Context, actionID []byte) (backend.Object, io.ReadCloser, error) {
+// Get implements backend.Backend. One call counts as one outcome: a failed
+// call is a failure; a successful one is recorded when its bodies are
+// read, a clean end as a success and any other read error as a failure.
+func (b *Breaker) Get(ctx context.Context, actionIDs [][]byte) ([]backend.GetResult, error) {
 	if b.open.Load() {
-		return backend.Object{}, nil, ErrOpen
+		return nil, ErrOpen
 	}
 	ctx, release := b.guard(ctx)
-	// The whole call, body included, gets BodyTimeout; the much shorter
+	// The whole call, bodies included, gets BodyTimeout; the much shorter
 	// header timer only runs until next.Get returns.
 	ctx, cancel := context.WithTimeout(ctx, BodyTimeout)
 	done := func() { cancel(); release() }
 	headers := time.AfterFunc(b.timeout, cancel)
-	obj, body, err := b.next.Get(ctx, actionID)
+	res, err := b.next.Get(ctx, actionIDs)
 	if !headers.Stop() {
-		if err == nil {
-			body.Close()
+		for _, r := range res {
+			r.Close()
 		}
 		err = fmt.Errorf("breaker: no response within %s: %w", b.timeout, context.DeadlineExceeded)
 	}
 	if err != nil {
 		b.record(err)
 		done()
-		return backend.Object{}, nil, err
+		return nil, err
 	}
-	// A successful Get is recorded once its body ends: at a clean EOF as a
-	// success, on any other read error as a failure.
-	return obj, &guardedBody{ReadCloser: body, b: b, done: done}, nil
+	g := &getGuard{b: b, done: done}
+	for i := range res {
+		if res[i].Body != nil {
+			g.open++
+			res[i].Body = &guardedBody{ReadCloser: res[i].Body, g: g}
+		}
+	}
+	if g.open == 0 {
+		b.record(nil)
+		done()
+	}
+	return res, nil
 }
 
-// guardedBody records how reading a Get's body ends and releases the Get's
-// contexts when the caller closes it.
-type guardedBody struct {
-	io.ReadCloser
+// getGuard records how reading the bodies of one Get ends and releases the
+// Get's contexts once they are all closed.
+type getGuard struct {
 	b        *Breaker
+	mu       sync.Mutex
+	open     int
 	recorded bool
 	done     func()
 }
 
-func (g *guardedBody) Read(p []byte) (int, error) {
-	n, err := g.ReadCloser.Read(p)
-	if err != nil && !g.recorded {
+func (g *getGuard) result(err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.recorded {
+		return
+	}
+	if err != nil {
 		g.recorded = true
-		if err == io.EOF {
-			g.b.record(nil)
-		} else {
-			g.b.record(err)
-		}
+		g.b.record(err)
+	}
+}
+
+func (g *getGuard) closed() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.open--; g.open > 0 {
+		return
+	}
+	if !g.recorded {
+		g.recorded = true
+		g.b.record(nil)
+	}
+	g.done()
+}
+
+type guardedBody struct {
+	io.ReadCloser
+	g      *getGuard
+	closed bool
+}
+
+func (gb *guardedBody) Read(p []byte) (int, error) {
+	n, err := gb.ReadCloser.Read(p)
+	if err != nil && err != io.EOF {
+		gb.g.result(err)
 	}
 	return n, err
 }
 
-func (g *guardedBody) Close() error {
-	err := g.ReadCloser.Close()
-	g.done()
+func (gb *guardedBody) Close() error {
+	err := gb.ReadCloser.Close()
+	if !gb.closed {
+		gb.closed = true
+		gb.g.closed()
+	}
 	return err
 }
 
-// Put implements backend.Backend.
-func (b *Breaker) Put(ctx context.Context, actionID []byte, obj backend.Object, body io.Reader) error {
+// Put implements backend.Backend. Only a failure of the whole call counts;
+// per-item results are answers from a reachable backend.
+func (b *Breaker) Put(ctx context.Context, items []backend.PutItem) ([]error, error) {
 	if b.open.Load() {
-		return ErrOpen
+		return nil, ErrOpen
 	}
 	ctx, release := b.guard(ctx)
 	defer release()
-	err := b.next.Put(ctx, actionID, obj, body)
+	errs, err := b.next.Put(ctx, items)
 	b.record(err)
-	return err
+	return errs, err
 }

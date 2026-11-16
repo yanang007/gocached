@@ -22,6 +22,12 @@ One place objects can be stored and looked up, such as the local disk or a remot
 **Chain**:
 An ordered list of backends consulted in turn. The first backend is always the local disk, because `go` needs every hit as a file on disk.
 
+**Batch**:
+A set of objects carried by one request, in either direction. Every backend call and every request on the wire is a batch; a single object is a batch of one.
+
+**Upload queue**:
+The client's collection of objects stored locally but not yet uploaded. It groups them into batches by count, size and delay, and slows go's puts down when too much is waiting.
+
 **Hit**:
 The first backend in a chain that holds the requested action ID, together with the object it holds.
 

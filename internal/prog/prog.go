@@ -15,9 +15,9 @@ import (
 
 	"github.com/yanang007/gocached/backend"
 	"github.com/yanang007/gocached/chain"
+	"github.com/yanang007/gocached/internal/bundler"
 	"github.com/yanang007/gocached/internal/cacheprog"
 	"github.com/yanang007/gocached/internal/kind"
-	"golang.org/x/sync/errgroup"
 )
 
 // Options configures a prog session.
@@ -34,16 +34,56 @@ type Options struct {
 	// DrainTimeout bounds how long close waits for pending uploads; the ones
 	// still running after it are dropped. Zero means DefaultDrainTimeout.
 	DrainTimeout time.Duration
+
+	// Upload sets how puts are batched into uploads. Zero fields take the
+	// value from DefaultUpload.
+	Upload bundler.Options
+	// UploadTimeout bounds each batch upload. Zero means
+	// DefaultUploadTimeout.
+	UploadTimeout time.Duration
 }
 
-// Upload tuning: uploads run in the background, at most uploadConcurrency at
-// a time, each bounded by uploadTimeout. A put whose upload cannot start
-// because all slots are busy waits for one (backpressure).
+// Upload defaults: puts are uploaded in the background, batched so that a
+// build's many small objects take few requests (ADR 0005). A put blocks
+// only while the buffered uploads exceed BufferBytes (backpressure).
 const (
-	DefaultDrainTimeout = 60 * time.Second
-	uploadConcurrency   = 4
-	uploadTimeout       = 30 * time.Second
+	DefaultDrainTimeout  = 60 * time.Second
+	DefaultUploadTimeout = 30 * time.Second
 )
+
+// DefaultUpload are the default batching limits.
+var DefaultUpload = bundler.Options{
+	MaxItems:    256,
+	MaxBytes:    4 << 20,
+	Oversize:    1 << 20,
+	MaxDelay:    10 * time.Millisecond,
+	Concurrency: 4,
+	BufferBytes: 64 << 20,
+}
+
+// withDefaults fills the zero fields of o from DefaultUpload.
+func withDefaults(o bundler.Options) bundler.Options {
+	d := DefaultUpload
+	if o.MaxItems > 0 {
+		d.MaxItems = o.MaxItems
+	}
+	if o.MaxBytes > 0 {
+		d.MaxBytes = o.MaxBytes
+	}
+	if o.Oversize > 0 {
+		d.Oversize = o.Oversize
+	}
+	if o.MaxDelay > 0 {
+		d.MaxDelay = o.MaxDelay
+	}
+	if o.Concurrency > 0 {
+		d.Concurrency = o.Concurrency
+	}
+	if o.BufferBytes > 0 {
+		d.BufferBytes = o.BufferBytes
+	}
+	return d
+}
 
 type counters struct {
 	get, hitLocal, hitRemote, miss, put, uploadOK, uploadFail atomic.Int64
@@ -58,10 +98,17 @@ func Run(ctx context.Context, in io.Reader, out, errOut io.Writer, opts Options)
 	if opts.DrainTimeout <= 0 {
 		opts.DrainTimeout = DefaultDrainTimeout
 	}
+	if opts.UploadTimeout <= 0 {
+		opts.UploadTimeout = DefaultUploadTimeout
+	}
 	s := &session{opts: opts, errOut: errOut}
-	s.uploadCtx, s.dropUploads = context.WithCancel(ctx)
-	defer s.dropUploads()
-	s.uploads.SetLimit(uploadConcurrency)
+	s.uploads = bundler.New(withDefaults(opts.Upload), func(st chain.Stored) int64 { return st.Object.Size }, s.uploadBatch)
+	defer func() {
+		// Stops uploads left over when Serve failed; a no-op after drain.
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		s.uploads.Close(ctx)
+	}()
 	err := cacheprog.Serve(ctx, in, out, s)
 	if err == nil && !s.closed {
 		// EOF without close: still give pending uploads their chance.
@@ -76,15 +123,13 @@ type session struct {
 	stats  counters
 	closed bool // Close ran; set and read on Serve's goroutine only
 
-	errOut      io.Writer
-	uploads     errgroup.Group // background uploads; tasks never return errors
-	uploadCtx   context.Context
-	dropUploads context.CancelFunc
+	errOut  io.Writer
+	uploads *bundler.Bundler[chain.Stored]
 
 	// upMu guards the upload bookkeeping, so that uploads finishing after
 	// a drain timeout no longer change the counters already reported.
 	upMu       sync.Mutex
-	pending    int64 // uploads started or waiting for a slot, not yet finished
+	pending    int64 // uploads queued or running, not yet finished
 	dropped    bool  // drain timed out; late results are ignored
 	loggedFail bool  // the first upload failure has been logged
 
@@ -95,25 +140,23 @@ type session struct {
 
 func (s *session) Get(ctx context.Context, actionID []byte) (cacheprog.Entry, error) {
 	s.stats.get.Add(1)
-	hit, err := s.opts.Chain.Get(ctx, actionID)
-	if err != nil {
-		// Any backend failure degrades to a miss; go will compile and put.
+	ids := [][]byte{actionID}
+	hit := s.opts.Chain.Get(ctx, ids)
+	// Any backend failure degrades to a miss; go will compile and put. A
+	// hit whose content could not land on local disk (e.g. a corrupted or
+	// truncated download) is a miss too.
+	f := s.opts.Chain.Fill(ctx, ids, hit)[0]
+	if f.Path == "" {
 		s.stats.miss.Add(1)
 		return cacheprog.Entry{}, cacheprog.ErrMiss
 	}
-	path, _ := s.opts.Chain.Fill(ctx, actionID, hit)
-	if path == "" {
-		// The content could not land on local disk (e.g. a corrupted or
-		// truncated download); go compiles it instead.
-		s.stats.miss.Add(1)
-		return cacheprog.Entry{}, cacheprog.ErrMiss
-	}
-	if hit.Index == 0 {
+	h := hit[0]
+	if h.Index == 0 {
 		s.stats.hitLocal.Add(1)
 	} else {
 		s.stats.hitRemote.Add(1)
 	}
-	return cacheprog.Entry{OutputID: hit.Object.OutputID, Size: hit.Object.Size, Time: hit.Object.Time, DiskPath: path}, nil
+	return cacheprog.Entry{OutputID: h.Object.OutputID, Size: h.Object.Size, Time: h.Object.Time, DiskPath: f.Path}, nil
 }
 
 func (s *session) Put(ctx context.Context, actionID, outputID []byte, size int64, body io.Reader) (string, error) {
@@ -132,7 +175,7 @@ func (s *session) Put(ctx context.Context, actionID, outputID []byte, size int64
 		s.stats.kindSkip[i].Add(1)
 		return path, nil
 	}
-	s.upload(actionID, obj, path)
+	s.upload(ctx, chain.Stored{ActionID: actionID, Object: obj, Path: path})
 	return path, nil
 }
 
@@ -155,23 +198,53 @@ func (s *session) Close(context.Context) error {
 	return nil
 }
 
-// upload copies a locally stored object to the remaining backends in the
-// background. It blocks only while all upload slots are busy. Failures are
-// counted and logged once; they never fail the put.
-func (s *session) upload(actionID []byte, obj backend.Object, path string) {
+// upload queues a locally stored object for the remaining backends. It
+// blocks only while the upload buffer is full. Failures are counted and
+// logged once; they never fail the put.
+func (s *session) upload(ctx context.Context, st chain.Stored) {
 	if s.opts.Chain.Len() < 2 {
 		return
 	}
 	s.upMu.Lock()
 	s.pending++
 	s.upMu.Unlock()
-	s.uploads.Go(func() error {
-		ctx, cancel := context.WithTimeout(s.uploadCtx, uploadTimeout)
-		defer cancel()
-		err := s.opts.Chain.Upload(ctx, actionID, obj, path)
-		s.finishUpload(actionID, obj.Kind, err)
-		return nil
-	})
+	if err := s.uploads.Add(ctx, st); err != nil {
+		s.finishUpload(st.ActionID, st.Object.Kind, err)
+	}
+}
+
+// uploadBatch uploads one batch from the bundler and records each item.
+func (s *session) uploadBatch(ctx context.Context, batch []chain.Stored) {
+	// A backend may have refused a kind while this batch waited; those
+	// items are skipped instead of sent.
+	send := batch[:0:0]
+	for _, st := range batch {
+		if s.skips(st.Object.Kind) {
+			s.finishSkip(st.Object.Kind)
+			continue
+		}
+		send = append(send, st)
+	}
+	if len(send) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, s.opts.UploadTimeout)
+	defer cancel()
+	for i, err := range s.opts.Chain.Upload(ctx, send) {
+		s.finishUpload(send[i].ActionID, send[i].Object.Kind, err)
+	}
+}
+
+// finishSkip records a queued upload dropped because its kind was refused.
+func (s *session) finishSkip(k kind.Kind) {
+	s.upMu.Lock()
+	defer s.upMu.Unlock()
+	if s.dropped {
+		return
+	}
+	s.pending--
+	s.stats.skip.Add(1)
+	s.stats.kindSkip[k.Index()].Add(1)
 }
 
 func (s *session) finishUpload(actionID []byte, k kind.Kind, err error) {
@@ -204,27 +277,19 @@ func (s *session) finishUpload(actionID []byte, k kind.Kind, err error) {
 	}
 }
 
-// drain waits up to DrainTimeout for pending uploads. Uploads still pending
-// after that are cancelled, counted as failed and logged. It returns how
-// long it waited.
+// drain sends what is queued and waits up to DrainTimeout for pending
+// uploads. Uploads still pending after that are cancelled, counted as
+// failed and logged. It returns how long it waited.
 func (s *session) drain() time.Duration {
 	begin := time.Now()
-	done := make(chan struct{})
-	go func() {
-		s.uploads.Wait()
-		close(done)
-	}()
-	timer := time.NewTimer(s.opts.DrainTimeout)
-	defer timer.Stop()
-	select {
-	case <-done:
-	case <-timer.C:
+	ctx, cancel := context.WithTimeout(context.Background(), s.opts.DrainTimeout)
+	defer cancel()
+	if err := s.uploads.Close(ctx); err != nil {
 		s.upMu.Lock()
 		s.dropped = true
 		n := s.pending
 		s.stats.uploadFail.Add(n)
 		s.upMu.Unlock()
-		s.dropUploads()
 		fmt.Fprintf(s.errOut, "gocached upload: drain timed out after %s, dropped %d pending uploads\n", s.opts.DrainTimeout, n)
 	}
 	return time.Since(begin)

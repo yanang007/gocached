@@ -79,6 +79,13 @@ By default, `gocached prog` uses a private local cache directory, `<user cache d
 | `GOCACHED_DRAIN_TIMEOUT` | `60s`                         | How long the client waits for pending uploads when the go command ends. |
 | `GOCACHED_QUIET`         | unset                         | Set to `1` to silence the stats line. |
 | `GOCACHED_SKIP_KINDS`    | `index`                       | Entry kinds to keep local and never upload (see [Entry kinds](#entry-kinds)). |
+| `GOCACHED_UPLOAD_BATCH_ITEMS`  | `256`      | Most objects in one upload request. |
+| `GOCACHED_UPLOAD_BATCH_BYTES`  | `4194304`  | Most content bytes in one upload request (4 MiB). |
+| `GOCACHED_UPLOAD_SMALL_MAX`    | `1048576`  | Objects of at least this many bytes (1 MiB) are uploaded alone instead of batched. |
+| `GOCACHED_UPLOAD_BATCH_DELAY`  | `10ms`     | Longest an object waits for its batch to fill before the batch is sent anyway. |
+| `GOCACHED_UPLOAD_CONCURRENCY`  | `4`        | Upload requests in flight at once. |
+| `GOCACHED_UPLOAD_BUFFER_BYTES` | `67108864` | Bytes waiting for upload (64 MiB) before go's puts block until uploads catch up. |
+| `GOCACHED_UPLOAD_TIMEOUT`      | `30s`      | Timeout of each upload request. |
 
 ### Shared setup
 
@@ -107,14 +114,14 @@ After that, set `GOCACHED_DIR=/path/to/cache` and `GOCACHED_SHARE=1`.
 
 All other client variables (`GOCACHED_URL`, `GOCACHED_TOKEN`, etc.) apply in both modes.
 
-Durations are a Go duration (`500ms`, `1m`) or plain seconds (`1.5`). An invalid or non-positive duration makes `gocached` exit with an error at startup instead of falling back to the default.
+Durations are a Go duration (`500ms`, `1m`) or plain seconds (`1.5`). Counts and byte sizes are plain positive integers (`4194304`, not `4MiB`). An invalid or non-positive value makes `gocached` exit with an error at startup instead of falling back to the default.
 
 ### Behavior when the server is slow or down
 
 - **Lookups:** a remote get that fails, or whose response does not start within `GOCACHED_TIMEOUT`, counts as a miss, and go compiles the object itself. After 3 consecutive remote failures, the client skips the server for the rest of that go command. The next go command starts a new client and tries again.
 - **Verification:** downloads are checked against their sha256 output ID. A corrupted object counts as a miss.
-- **Uploads:** objects go compiles are written to the local directory first and go continues at once. Uploads run in the background, at most 4 at a time, each limited to 30s. When 4 are in flight, the next one waits for a free slot. A failed upload is counted in `upload_fail` and never fails the build.
-- **Refused kinds:** a server that does not accept a kind answers `415`. The client counts it in `skip` and `rejected`, not in `upload_fail`, never trips the breaker on it, and stops uploading that kind for the rest of the go command.
+- **Uploads:** objects go compiles are written to the local directory first and go continues at once. Uploads run in the background, batched so that a build's many small objects take few requests: a batch is sent once it holds `GOCACHED_UPLOAD_BATCH_ITEMS` objects or `GOCACHED_UPLOAD_BATCH_BYTES` bytes, or `GOCACHED_UPLOAD_BATCH_DELAY` after its first object, and objects of at least `GOCACHED_UPLOAD_SMALL_MAX` bytes go alone. At most `GOCACHED_UPLOAD_CONCURRENCY` (4) requests run at a time, each limited to `GOCACHED_UPLOAD_TIMEOUT` (30s). When more than `GOCACHED_UPLOAD_BUFFER_BYTES` wait, go's next put waits for room. A failed upload is counted in `upload_fail` and never fails the build.
+- **Refused kinds:** a server that does not accept a kind answers `skipped` for that object. The client counts it in `skip` and `rejected`, not in `upload_fail`, never trips the breaker on it, and stops uploading that kind for the rest of the go command.
 - **End of the go command:** the client waits up to `GOCACHED_DRAIN_TIMEOUT` (60s) for pending uploads (`drain=` in the stats line), then drops whatever is left.
 
 ## Server
@@ -186,13 +193,18 @@ go build std
 | `GOCACHED_METRICS_PULL`  | unset                                      | Set to `1` to serve Prometheus metrics on `/metrics`. |
 | `GOCACHED_PUSHGATEWAY`   | unset                                      | Pushgateway URL. If set, metrics are pushed periodically and once more on shutdown. |
 | `GOCACHED_PUSH_INTERVAL` | `15s`                                      | Push period. |
-| `GOCACHED_SKIP_KINDS`    | `index`                                    | Entry kinds refused on upload with `415` (see [Entry kinds](#entry-kinds)). Gets are not affected. |
+| `GOCACHED_SKIP_KINDS`    | `index`                                    | Entry kinds refused on upload (see [Entry kinds](#entry-kinds)). Gets are not affected. |
+| `GOCACHED_UPLOAD_BATCH_ITEMS` | `256`                                 | Most objects the server accepts in one upload request; more is refused with `413`. Same variable and default as the client. |
+| `GOCACHED_UPLOAD_BATCH_BYTES` | `4194304`                             | Most content bytes the server accepts in one upload request, `413` beyond. A request holding a single object may be larger. |
 
 The server does not terminate TLS. Put it behind a reverse proxy if traffic needs encryption.
 
 ### Endpoints
 
-- `GET /cache/{actionID}` and `PUT /cache/{actionID}`: the cache API (token-protected when `GOCACHED_TOKEN` is set). A `PUT` may declare its kind as `?kind=<kind>`; a kind the server skips is refused with `415` and a `Gocached-Rejected-Kind` header. Uploads whose content does not match their output ID, or with malformed IDs or headers, are rejected with `400`; a server-side write failure (disk full, permissions) returns `500`.
+- `PUT /cache/batch` and `POST /cache/batch-get`: the cache API (token-protected when `GOCACHED_TOKEN` is set). Every request carries a batch of objects; see `internal/wire` for the format and `docs/adr/0005-batched-wire-and-client-upload-queue.md`.
+  - `PUT /cache/batch` takes a `multipart/mixed` body, one part per object with its metadata in `Gocached-Action-Id`, `Gocached-Output-Id`, `Gocached-Size` and optionally `Gocached-Kind` part headers. It answers `200` with a JSON array holding one result per object, in order: `stored`, `skipped` (kind refused, named in `kind`), `corrupt` (content does not match its size or output ID), `rejected` (malformed IDs) or `error` (a server-side write failure such as a full disk).
+  - `POST /cache/batch-get` takes a JSON array of hex action IDs (at most 1024) and answers `200` with a `multipart/mixed` body: a JSON manifest of the hits, then one part per hit. IDs not in the manifest are misses.
+  - A malformed request as a whole is `400`, one over the batch limits `413`. The server handles parts in order, so objects before the offending part may already be stored. The client counts a `413` as an upload failure but does not trip its breaker on it, since the server is healthy; a `413` means the client's batch limits are larger than the server's.
 - `GET /healthz`: liveness, no token.
 - `GET /metrics`: Prometheus metrics when `GOCACHED_METRICS_PULL=1`, no token.
 
@@ -200,9 +212,10 @@ The server does not terminate TLS. Put it behind a reverse proxy if traffic need
 
 | Metric                              | Labels |
 | ----------------------------------- | ------ |
-| `gocached_requests_total`           | `op` (`get`, `put`); `result`: `hit`, `miss` on get, and `stored`, `skipped` (kind refused), `corrupt` (content does not match its output ID), `rejected` (other malformed requests), `error` on put; `kind` of a put object, empty for gets and when not yet known |
-| `gocached_bytes_total`              | `direction` (`sent`, `received`) |
-| `gocached_request_duration_seconds` | `op` |
+| `gocached_requests_total`           | One per object of a batch. `op` (`get`, `put`); `result`: `hit`, `miss` on get, and the per-object put results `stored`, `skipped`, `corrupt`, `rejected`, `error`; `kind` of a put object, empty for gets and when not yet known |
+| `gocached_bytes_total`              | Object content bytes; `direction` (`sent` on get hits, `received` on stored puts) |
+| `gocached_request_duration_seconds` | One per HTTP request; `op` |
+| `gocached_batch_size`               | Objects per HTTP request; `op`. A request refused before its first object counts as 0. |
 
 When neither pull nor push is enabled, no metrics are collected.
 
@@ -218,7 +231,7 @@ gocached recognizes what each uploaded object is from its first bytes:
 | `empty`   | A zero-size object, mostly compile output that printed nothing. |
 | `other`   | Everything else, such as test output and cgo or cover files. |
 
-`GOCACHED_SKIP_KINDS` takes a comma-separated list of kinds, `none` or `all`, and means the same on both sides: the client keeps those kinds local, and the server refuses them. The default `index` keeps package indexes off the server, since uploading them costs a request each and other machines cannot use them. They still hit locally. On the server, `all` stops all uploads without stopping gets. An unknown name makes `gocached` exit with an error at startup.
+`GOCACHED_SKIP_KINDS` takes a comma-separated list of kinds, `none` or `all`, and means the same on both sides: the client keeps those kinds local, and the server refuses them. The default `index` keeps package indexes off the server, since uploading them costs bandwidth and other machines cannot use them. They still hit locally. On the server, `all` stops all uploads without stopping gets. An unknown name makes `gocached` exit with an error at startup.
 
 Only uploads are classified: a get carries only the action ID, so lookups are counted as before. See `docs/adr/0004-entry-kinds-recognized-on-put-index-skipped-by-default.md` and `docs/research/go-cache-entry-kinds.md`.
 

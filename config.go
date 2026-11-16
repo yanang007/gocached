@@ -10,10 +10,12 @@ import (
 
 	"github.com/caarlos0/env/v11"
 
+	"github.com/yanang007/gocached/internal/bundler"
 	"github.com/yanang007/gocached/internal/gocachedir"
 	"github.com/yanang007/gocached/internal/kind"
 	"github.com/yanang007/gocached/internal/metrics"
 	"github.com/yanang007/gocached/internal/prog"
+	"github.com/yanang007/gocached/internal/server"
 )
 
 // breakerMaxFailures is how many consecutive remote failures disable the
@@ -43,10 +45,45 @@ type progConfig struct {
 	DrainTimeout  duration `env:"GOCACHED_DRAIN_TIMEOUT"`
 	Quiet         flag     `env:"GOCACHED_QUIET"`
 	SkipKinds     kind.Set `env:"GOCACHED_SKIP_KINDS" envDefault:"index"` // not uploaded
+	BatchLimits
+	SmallMax      count    `env:"GOCACHED_UPLOAD_SMALL_MAX"`
+	BatchDelay    duration `env:"GOCACHED_UPLOAD_BATCH_DELAY"`
+	Concurrency   count    `env:"GOCACHED_UPLOAD_CONCURRENCY"`
+	BufferBytes   count    `env:"GOCACHED_UPLOAD_BUFFER_BYTES"`
+	UploadTimeout duration `env:"GOCACHED_UPLOAD_TIMEOUT"`
+}
+
+// BatchLimits is the environment shared by prog and serve that bounds one
+// upload batch: the client's batching limits and the server's hard limits
+// (ADR 0005).
+type BatchLimits struct {
+	BatchItems count `env:"GOCACHED_UPLOAD_BATCH_ITEMS"`
+	BatchBytes count `env:"GOCACHED_UPLOAD_BATCH_BYTES"`
+}
+
+// upload returns the client's upload batching options.
+func (c progConfig) upload() bundler.Options {
+	return bundler.Options{
+		MaxItems:    int(c.BatchItems),
+		MaxBytes:    int64(c.BatchBytes),
+		Oversize:    int64(c.SmallMax),
+		MaxDelay:    time.Duration(c.BatchDelay),
+		Concurrency: int(c.Concurrency),
+		BufferBytes: int64(c.BufferBytes),
+	}
 }
 
 func progConfigFromEnv() (progConfig, error) {
-	cfg := progConfig{DrainTimeout: duration(prog.DefaultDrainTimeout)}
+	d := prog.DefaultUpload
+	cfg := progConfig{
+		DrainTimeout:  duration(prog.DefaultDrainTimeout),
+		BatchLimits:   BatchLimits{BatchItems: count(d.MaxItems), BatchBytes: count(d.MaxBytes)},
+		SmallMax:      count(d.Oversize),
+		BatchDelay:    duration(d.MaxDelay),
+		Concurrency:   count(d.Concurrency),
+		BufferBytes:   count(d.BufferBytes),
+		UploadTimeout: duration(prog.DefaultUploadTimeout),
+	}
 	if err := parseEnv(&cfg); err != nil {
 		return cfg, err
 	}
@@ -62,10 +99,14 @@ type serveConfig struct {
 	Pushgateway  string   `env:"GOCACHED_PUSHGATEWAY"`
 	PushInterval duration `env:"GOCACHED_PUSH_INTERVAL"`
 	SkipKinds    kind.Set `env:"GOCACHED_SKIP_KINDS" envDefault:"index"` // refused on put
+	BatchLimits
 }
 
 func serveConfigFromEnv() (serveConfig, error) {
-	cfg := serveConfig{PushInterval: duration(metrics.DefaultPushInterval)}
+	cfg := serveConfig{
+		PushInterval: duration(metrics.DefaultPushInterval),
+		BatchLimits:  BatchLimits{BatchItems: server.DefaultMaxBatchItems, BatchBytes: server.DefaultMaxBatchBytes},
+	}
 	if err := parseEnv(&cfg); err != nil {
 		return cfg, err
 	}
@@ -139,6 +180,23 @@ func (d *duration) UnmarshalText(text []byte) error {
 		return fmt.Errorf("%q: must be positive", v)
 	}
 	*d = duration(p)
+	return nil
+}
+
+// count is a positive integer, such as a number of items or bytes. Byte
+// counts are plain integers (4194304, not 4MiB), like strconv parses them.
+type count int64
+
+func (c *count) UnmarshalText(text []byte) error {
+	v := string(text)
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return fmt.Errorf("%q: want a whole number", v)
+	}
+	if n <= 0 {
+		return fmt.Errorf("%q: must be positive", v)
+	}
+	*c = count(n)
 	return nil
 }
 
