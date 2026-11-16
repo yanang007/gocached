@@ -16,6 +16,7 @@ import (
 	"github.com/yanang007/gocached/internal/metrics"
 	"github.com/yanang007/gocached/internal/prog"
 	"github.com/yanang007/gocached/internal/server"
+	"github.com/yanang007/gocached/internal/wire"
 )
 
 // breakerMaxFailures is how many consecutive remote failures disable the
@@ -41,6 +42,7 @@ type progConfig struct {
 	CacheDirEnv
 	URL           string   `env:"GOCACHED_URL"` // empty means local only
 	Token         string   `env:"GOCACHED_TOKEN"`
+	NodeTag       nodeTag  `env:"GOCACHED_NODE_TAG"`
 	RemoteTimeout duration `env:"GOCACHED_TIMEOUT" envDefault:"2s"`
 	DrainTimeout  duration `env:"GOCACHED_DRAIN_TIMEOUT"`
 	Quiet         flag     `env:"GOCACHED_QUIET"`
@@ -197,6 +199,17 @@ func (c *count) UnmarshalText(text []byte) error {
 		return fmt.Errorf("%q: must be positive", v)
 	}
 	*c = count(n)
+	return nil
+}
+
+// nodeTag is a node tag sent to the server (wire.ValidNodeTag).
+type nodeTag string
+
+func (t *nodeTag) UnmarshalText(text []byte) error {
+	if err := wire.ValidNodeTag(string(text)); err != nil {
+		return err
+	}
+	*t = nodeTag(text)
 	return nil
 }
 

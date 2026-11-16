@@ -82,6 +82,7 @@ By default, `gocached prog` uses a private local cache directory, `<user cache d
 | `GOCACHED_DIR`           | `<user cache dir>/gocached`   | Local cache directory, created if missing. `<user cache dir>` is `$XDG_CACHE_HOME` or `~/.cache` on Linux. |
 | `GOCACHED_URL`           | unset                         | Server base URL. Unset means local disk only. |
 | `GOCACHED_TOKEN`         | unset                         | Shared token, sent as `Authorization: Bearer <token>`. |
+| `GOCACHED_NODE_TAG`      | unset                         | A name for this node or repository, such as `ci-linux/backend`, sent as the `Gocached-Node-Tag` header. The server records it as the `node_tag` label on its metrics and in its error logs. Letters, digits, `.`, `_`, `-` and `/`, at most 128 bytes; anything else makes `gocached` exit at startup. |
 | `GOCACHED_TIMEOUT`       | `2s`                          | Remote get timeout: how long to wait for the server's response headers. Reading the body is bounded separately (30s). |
 | `GOCACHED_DRAIN_TIMEOUT` | `60s`                         | How long the client waits for pending uploads when the go command ends. |
 | `GOCACHED_QUIET`         | unset                         | Set to `1` to silence the stats line. |
@@ -223,6 +224,8 @@ The server does not terminate TLS. Put it behind a reverse proxy if traffic need
 | `gocached_bytes_total`              | Object content bytes; `direction` (`sent` on get hits, `received` on stored puts) |
 | `gocached_request_duration_seconds` | One per HTTP request; `op` |
 | `gocached_batch_size`               | Objects per HTTP request; `op`. A request refused before its first object counts as 0. |
+
+Every metric also has a `node_tag` label: the client's `GOCACHED_NODE_TAG`, empty when the client sets none, and `invalid` when the header is malformed. Each distinct tag adds its own series, so pick tags with a bounded set of values, such as runner groups or repositories, not per-job IDs.
 
 When neither pull nor push is enabled, no metrics are collected.
 

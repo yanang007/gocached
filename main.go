@@ -25,6 +25,9 @@
 //
 //	GOCACHED_URL            gocached server base URL; unset means local disk only
 //	GOCACHED_TOKEN          shared token sent as "Authorization: Bearer <token>"
+//	GOCACHED_NODE_TAG       name of this node, sent as Gocached-Node-Tag and
+//	                        recorded in the server's metrics and error logs;
+//	                        letters, digits, '.', '_', '-', '/', at most 128
 //	GOCACHED_TIMEOUT        remote get timeout until the response headers
 //	                        arrive (default: 2s); after 3 consecutive remote
 //	                        failures remote is skipped for the rest of the
@@ -110,7 +113,7 @@ func runProg() error {
 	}
 	var rest []backend.Backend
 	if cfg.URL != "" {
-		client := &http.Client{Transport: wire.BearerTransport(cfg.Token, nil)}
+		client := &http.Client{Transport: wire.NodeTagTransport(string(cfg.NodeTag), wire.BearerTransport(cfg.Token, nil))}
 		rest = append(rest, breaker.New(remote.New(cfg.URL, client), breakerMaxFailures, time.Duration(cfg.RemoteTimeout)))
 	}
 	return prog.Run(context.Background(), os.Stdin, os.Stdout, os.Stderr, prog.Options{
