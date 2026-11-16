@@ -3,13 +3,11 @@ package breaker_test
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,6 +16,7 @@ import (
 	"github.com/yanang007/gocached/backend"
 	"github.com/yanang007/gocached/backend/breaker"
 	"github.com/yanang007/gocached/backend/remote"
+	"github.com/yanang007/gocached/internal/backendtest"
 	"github.com/yanang007/gocached/internal/wire"
 )
 
@@ -62,7 +61,7 @@ func TestGetFromHangingServerFailsAfterTimeout(t *testing.T) {
 	b := breaker.New(remote.New(hangingURL(t), nil), 3, 200*time.Millisecond)
 
 	start := time.Now()
-	_, _, err := b.Get(context.Background(), actionID("hang"))
+	_, _, err := backendtest.Get(context.Background(), b, actionID("hang"))
 	if err == nil || errors.Is(err, backend.ErrMiss) {
 		t.Fatalf("want a non-miss failure, got %v", err)
 	}
@@ -89,9 +88,9 @@ func TestThreeConsecutiveFailuresDisableBackendForGetAndPut(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 5; i++ {
-		b.Get(ctx, actionID("fail"))
+		backendtest.Get(ctx, b, actionID("fail"))
 	}
-	if err := b.Put(ctx, actionID("fail"), backend.Object{OutputID: actionID("out"), Size: 1}, strings.NewReader("x")); err == nil {
+	if err := backendtest.Put(ctx, b, actionID("fail"), backend.Object{OutputID: actionID("out"), Size: 1}, "x"); err == nil {
 		t.Fatal("Put after the breaker opened should fail")
 	}
 	if got := hits.Load(); got != 3 {
@@ -106,10 +105,10 @@ func TestTrippingCancelsInFlightPut(t *testing.T) {
 	putDone := make(chan error, 1)
 	go func() {
 		// No deadline of its own: only the breaker can end it.
-		putDone <- b.Put(ctx, actionID("put"), backend.Object{OutputID: actionID("out"), Size: 1}, strings.NewReader("x"))
+		putDone <- backendtest.Put(ctx, b, actionID("put"), backend.Object{OutputID: actionID("out"), Size: 1}, "x")
 	}()
 	for i := 0; i < 3; i++ {
-		b.Get(ctx, actionID("get"))
+		backendtest.Get(ctx, b, actionID("get"))
 	}
 	select {
 	case err := <-putDone:
@@ -121,12 +120,25 @@ func TestTrippingCancelsInFlightPut(t *testing.T) {
 	}
 }
 
+// missServer answers every batch-get with all misses and counts requests.
+func missServer(t *testing.T) (string, *atomic.Int64) {
+	t.Helper()
+	var n atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		ids, _ := wire.ParseGet(r)
+		wire.WriteGetResponse(w, ids, nil)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, &n
+}
+
 func TestMissesDoNotTripBreaker(t *testing.T) {
-	url, hits := countingServer(t, http.StatusNotFound)
+	url, hits := missServer(t)
 	b := breaker.New(remote.New(url, nil), 3, time.Second)
 
 	for i := 0; i < 5; i++ {
-		if _, _, err := b.Get(context.Background(), actionID("miss")); !errors.Is(err, backend.ErrMiss) {
+		if _, _, err := backendtest.Get(context.Background(), b, actionID("miss")); !errors.Is(err, backend.ErrMiss) {
 			t.Fatalf("Get %d: want ErrMiss, got %v", i, err)
 		}
 	}
@@ -140,7 +152,8 @@ func TestMissResetsConsecutiveFailures(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// fail, fail, miss, fail, fail, miss, ...: never three failures in a row.
 		if n.Add(1)%3 == 0 {
-			w.WriteHeader(http.StatusNotFound)
+			ids, _ := wire.ParseGet(r)
+			wire.WriteGetResponse(w, ids, nil)
 			return
 		}
 		w.WriteHeader(http.StatusInternalServerError)
@@ -149,33 +162,70 @@ func TestMissResetsConsecutiveFailures(t *testing.T) {
 	b := breaker.New(remote.New(srv.URL, nil), 3, time.Second)
 
 	for i := 0; i < 9; i++ {
-		b.Get(context.Background(), actionID("flaky"))
+		backendtest.Get(context.Background(), b, actionID("flaky"))
 	}
 	if got := n.Load(); got != 9 {
 		t.Fatalf("server saw %d requests, want 9 (breaker should stay closed)", got)
 	}
 }
 
-// slowBodyServer sends the response headers at once, then sends body in
-// three parts, waiting step before each one.
-func slowBodyServer(t *testing.T, body string, step time.Duration) string {
+// slowReader yields its content in three parts, waiting step before each.
+type slowReader struct {
+	parts []string
+	step  time.Duration
+}
+
+func (r *slowReader) Read(p []byte) (int, error) {
+	if len(r.parts) == 0 {
+		return 0, io.EOF
+	}
+	time.Sleep(r.step)
+	n := copy(p, r.parts[0])
+	r.parts[0] = r.parts[0][n:]
+	if r.parts[0] == "" {
+		r.parts = r.parts[1:]
+	}
+	return n, nil
+}
+
+// flushWriter flushes after every write, so a slow body arrives slowly.
+type flushWriter struct{ http.ResponseWriter }
+
+func (w flushWriter) Write(p []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(p)
+	w.ResponseWriter.(http.Flusher).Flush()
+	return n, err
+}
+
+// serveOne answers every batch-get with a single hit for the first ID
+// whose content comes from open.
+func serveOne(t *testing.T, size int64, open func() io.Reader, after func(http.ResponseWriter)) (string, *atomic.Int64) {
 	t.Helper()
-	sum := sha256.Sum256([]byte(body))
+	var n atomic.Int64
+	sum := sha256.Sum256(nil)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(wire.HeaderOutputID, hex.EncodeToString(sum[:]))
-		w.Header().Set(wire.HeaderTime, "0")
-		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-		w.WriteHeader(http.StatusOK)
-		w.(http.Flusher).Flush()
-		third := len(body) / 3
-		for _, part := range []string{body[:third], body[third : 2*third], body[2*third:]} {
-			time.Sleep(step)
-			io.WriteString(w, part)
-			w.(http.Flusher).Flush()
+		n.Add(1)
+		ids, _ := wire.ParseGet(r)
+		hit := wire.GetHit{Index: 0, Object: backend.Object{OutputID: sum[:], Size: size},
+			Open: func() (io.ReadCloser, error) { return io.NopCloser(open()), nil }}
+		wire.WriteGetResponse(flushWriter{w}, ids, []wire.GetHit{hit})
+		if after != nil {
+			after(w)
 		}
 	}))
 	t.Cleanup(srv.Close)
-	return srv.URL
+	return srv.URL, &n
+}
+
+// slowBodyServer sends the response headers at once, then body in three
+// parts, waiting step before each one.
+func slowBodyServer(t *testing.T, body string, step time.Duration) string {
+	t.Helper()
+	third := len(body) / 3
+	url, _ := serveOne(t, int64(len(body)), func() io.Reader {
+		return &slowReader{parts: []string{body[:third], body[third : 2*third], body[2*third:]}, step: step}
+	}, nil)
+	return url
 }
 
 func TestSlowBodyIsNotCutOffByGetTimeout(t *testing.T) {
@@ -183,7 +233,7 @@ func TestSlowBodyIsNotCutOffByGetTimeout(t *testing.T) {
 	// Headers arrive at once; the body takes about 600ms, three times the timeout.
 	b := breaker.New(remote.New(slowBodyServer(t, want, 200*time.Millisecond), nil), 3, 200*time.Millisecond)
 
-	_, body, err := b.Get(context.Background(), actionID("slow"))
+	_, body, err := backendtest.Get(context.Background(), b, actionID("slow"))
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -201,21 +251,11 @@ func TestSlowBodyIsNotCutOffByGetTimeout(t *testing.T) {
 // connection. It counts requests.
 func truncatingServer(t *testing.T) (string, *atomic.Int64) {
 	t.Helper()
-	var n atomic.Int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n.Add(1)
-		w.Header().Set(wire.HeaderOutputID, hex.EncodeToString(actionID("out")))
-		w.Header().Set(wire.HeaderTime, "0")
-		w.Header().Set("Content-Length", "1000")
-		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, "0123456789")
-		w.(http.Flusher).Flush()
+	return serveOne(t, 1000, func() io.Reader { return strings.NewReader("0123456789") }, func(w http.ResponseWriter) {
 		if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
 			conn.Close()
 		}
-	}))
-	t.Cleanup(srv.Close)
-	return srv.URL, &n
+	})
 }
 
 func TestBodyReadFailuresTripBreaker(t *testing.T) {
@@ -223,7 +263,7 @@ func TestBodyReadFailuresTripBreaker(t *testing.T) {
 	b := breaker.New(remote.New(url, nil), 3, time.Second)
 
 	for i := 0; i < 5; i++ {
-		_, body, err := b.Get(context.Background(), actionID("cut"))
+		_, body, err := backendtest.Get(context.Background(), b, actionID("cut"))
 		if err != nil {
 			continue
 		}
@@ -240,20 +280,38 @@ func TestBodyReadFailuresTripBreaker(t *testing.T) {
 // rejectingBackend refuses every put by kind.
 type rejectingBackend struct{ puts atomic.Int64 }
 
-func (r *rejectingBackend) Get(context.Context, []byte) (backend.Object, io.ReadCloser, error) {
-	return backend.Object{}, nil, backend.ErrMiss
+func (r *rejectingBackend) Get(context.Context, [][]byte) ([]backend.GetResult, error) {
+	return []backend.GetResult{{Err: backend.ErrMiss}}, nil
 }
 
-func (r *rejectingBackend) Put(context.Context, []byte, backend.Object, io.Reader) error {
+func (r *rejectingBackend) Put(_ context.Context, items []backend.PutItem) ([]error, error) {
 	r.puts.Add(1)
-	return &backend.RejectedError{Kind: "index"}
+	errs := make([]error, len(items))
+	for i := range errs {
+		errs[i] = &backend.RejectedError{Kind: "index"}
+	}
+	return errs, nil
+}
+
+func TestOversizedBatchesDoNotTripBreaker(t *testing.T) {
+	url, hits := countingServer(t, http.StatusRequestEntityTooLarge)
+	b := breaker.New(remote.New(url, nil), 3, time.Second)
+	for i := 0; i < 5; i++ {
+		err := backendtest.Put(context.Background(), b, actionID("big"), backend.Object{OutputID: actionID("out"), Size: 1}, "x")
+		if !errors.Is(err, backend.ErrTooLarge) {
+			t.Fatalf("put %d: %v, want ErrTooLarge", i, err)
+		}
+	}
+	if got := hits.Load(); got != 5 {
+		t.Fatalf("breaker opened on 413s: server saw %d of 5 requests", got)
+	}
 }
 
 func TestRejectionsDoNotTripBreaker(t *testing.T) {
 	next := &rejectingBackend{}
 	b := breaker.New(next, 3, time.Second)
 	for i := 0; i < 5; i++ {
-		if err := b.Put(context.Background(), actionID("r"), backend.Object{}, strings.NewReader("")); !errors.Is(err, backend.ErrRejected) {
+		if err := backendtest.Put(context.Background(), b, actionID("r"), backend.Object{}, ""); !errors.Is(err, backend.ErrRejected) {
 			t.Fatalf("put %d: %v, want the rejection passed through", i, err)
 		}
 	}

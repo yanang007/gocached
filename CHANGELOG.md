@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+The wire protocol changes in a way that breaks compatibility with v0.3: client and server must be upgraded together.
+
+### Added
+
+- Batched uploads: the client queues uploads and sends many small objects in one request. Tuned by `GOCACHED_UPLOAD_BATCH_ITEMS` (256), `GOCACHED_UPLOAD_BATCH_BYTES` (4194304), `GOCACHED_UPLOAD_SMALL_MAX` (1048576), `GOCACHED_UPLOAD_BATCH_DELAY` (10ms), `GOCACHED_UPLOAD_CONCURRENCY` (4), `GOCACHED_UPLOAD_BUFFER_BYTES` (67108864) and `GOCACHED_UPLOAD_TIMEOUT` (30s, per request). The server reads the first two as hard limits and answers `413` beyond them.
+- `gocached_batch_size` histogram: objects per request.
+
+### Changed
+
+- **Breaking:** the cache API is `PUT /cache/batch` (`multipart/mixed`, per-object JSON results) and `POST /cache/batch-get`. `GET`/`PUT /cache/{actionID}` are removed, and so are `415` and `Gocached-Rejected-Kind`: a refused kind is the per-object result `skipped`. See ADR 0005.
+- **Breaking:** `gocached_requests_total` and `gocached_bytes_total` count objects, not requests; `gocached_bytes_total` counts content bytes of stored puts and get hits. `gocached_request_duration_seconds` is per batch request.
+
 ## [0.3.1] - 2026-11-15
 
 ### Fixed

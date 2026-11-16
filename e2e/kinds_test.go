@@ -202,9 +202,9 @@ func TestServerRejectsSkippedKindAndClientStopsUploadingIt(t *testing.T) {
 	if s["rejected"] == 0 || s["upload_fail"] != 0 {
 		t.Fatalf("the server should reject index uploads without failures, got %v", s)
 	}
-	// Up to the upload concurrency may be in flight before the first
-	// rejection arrives; after that the client skips locally.
-	if s["rejected"] > 4 || s["skip"] < s["rejected"] {
+	// Batches already in flight when the first rejection arrives are
+	// refused too; after that the client skips locally.
+	if s["skip"] < s["rejected"] {
 		t.Fatalf("client should stop uploading the rejected kind, got %v", s)
 	}
 	if k["index"][1] != k["index"][0] || k["archive"][1] != 0 {

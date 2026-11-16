@@ -1,11 +1,13 @@
-// Package chain implements the three-phase cache flow shared by the client
-// and the server over an ordered list of backends:
+// Package chain implements the cache flow shared by the client and the
+// server over an ordered list of backends, one batch at a time:
 //
-//   - Get finds the first backend that hits and records its index.
-//   - Fill writes the hit back to the backends before it, [0, index), and
-//     returns the local path of the content.
-//   - Put stores an object go produced in every backend: first the local one,
-//     then each other backend reads the local file on its own, concurrently.
+//   - Get finds, for each action ID, the first backend that hits and records
+//     its index.
+//   - Fill writes each hit back to the backends before it, [0, index), and
+//     returns the local path of its content.
+//   - PutLocal stores an object go produced on local disk; Upload then
+//     copies a batch of stored objects to every other backend, each of
+//     which reads the local files on its own, concurrently.
 //
 // Index 0 is always a local GOCACHE-format directory, because go needs a disk
 // path for every hit and every put.
@@ -36,8 +38,9 @@ func New(local *gocache.Cache, rest ...backend.Backend) *Chain {
 // Len reports the number of backends, including the local one.
 func (c *Chain) Len() int { return len(c.backends) }
 
-// Hit is the result of a successful Get.
+// Hit is the result of Get for one action ID.
 type Hit struct {
+	Err    error          // backend.ErrMiss when no backend hits
 	Index  int            // index of the backend that hit; 0 is local
 	Object backend.Object // object as recorded by that backend
 
@@ -53,89 +56,173 @@ func (h Hit) Close() error {
 	return nil
 }
 
-// Get returns the hit from the first backend that has actionID. Backend
-// failures other than backend.ErrMiss are skipped like misses. It returns
-// backend.ErrMiss when no backend hits.
-func (c *Chain) Get(ctx context.Context, actionID []byte) (Hit, error) {
-	if obj, path, err := c.local.GetFile(ctx, actionID); err == nil {
-		return Hit{Index: 0, Object: obj, path: path}, nil
+// Get returns one hit per action ID, in order, each from the first backend
+// that has it. Each backend is asked once, for the IDs still missing. A
+// failing backend is skipped like a miss. The hits must be passed to Fill,
+// or closed, in order.
+func (c *Chain) Get(ctx context.Context, actionIDs [][]byte) []Hit {
+	hits := make([]Hit, len(actionIDs))
+	var missing []int
+	for i, id := range actionIDs {
+		obj, path, err := c.local.GetFile(ctx, id)
+		if err != nil {
+			hits[i].Err = backend.ErrMiss
+			missing = append(missing, i)
+			continue
+		}
+		hits[i] = Hit{Index: 0, Object: obj, path: path}
 	}
-	for i := 1; i < len(c.backends); i++ {
-		obj, body, err := c.backends[i].Get(ctx, actionID)
+	for b := 1; b < len(c.backends) && len(missing) > 0; b++ {
+		ids := make([][]byte, len(missing))
+		for j, i := range missing {
+			ids[j] = actionIDs[i]
+		}
+		res, err := c.backends[b].Get(ctx, ids)
 		if err != nil {
 			continue
 		}
-		return Hit{Index: i, Object: obj, body: body}, nil
+		still := missing[:0:0]
+		for j, i := range missing {
+			if res[j].Err != nil {
+				still = append(still, i)
+				continue
+			}
+			hits[i] = Hit{Index: b, Object: res[j].Object, body: res[j].Body}
+		}
+		missing = still
 	}
-	return Hit{}, backend.ErrMiss
+	return hits
 }
 
-// Fill writes hit back to the backends before it, [0, hit.Index), and
-// returns the local path of its content. It always consumes the hit.
-//
-// If the local write fails, path is empty and the hit is unusable. A non-nil
-// error with a non-empty path means only a write-back to an intermediate
-// backend failed; the local copy is still valid.
-func (c *Chain) Fill(ctx context.Context, actionID []byte, hit Hit) (path string, err error) {
-	if hit.Index == 0 {
-		return hit.path, nil
-	}
-	defer hit.body.Close()
-	// The local write verifies size and sha256 against the output ID, so a
-	// corrupted download never reaches disk.
-	if err := c.local.Put(ctx, actionID, hit.Object, hit.body); err != nil {
-		return "", err
-	}
-	path = c.local.OutputFile(hit.Object.OutputID)
-	return path, c.propagate(ctx, actionID, hit.Object, path, c.backends[1:hit.Index])
+// Filled is the result of Fill for one hit.
+type Filled struct {
+	// Path is the local path of the content, empty when the hit was a miss
+	// or could not be written locally.
+	Path string
+	// Err is why Path is empty, or, with a non-empty Path, a write-back to
+	// an intermediate backend that failed; the local copy is still valid.
+	Err error
 }
 
-// Put stores body as the output of actionID in every backend and returns the
-// local path of its content.
-//
-// If the local write fails, path is empty. A non-nil error with a non-empty
-// path means the object is on local disk but at least one other backend
-// failed to store it.
-func (c *Chain) Put(ctx context.Context, actionID []byte, obj backend.Object, body io.Reader) (path string, err error) {
-	if path, err = c.PutLocal(ctx, actionID, obj, body); err != nil {
-		return "", err
+// Fill writes each hit back to the backends before it, [0, hit.Index), and
+// returns where its content is on local disk. It consumes every hit, in
+// order. The local write verifies size and sha256 against the output ID,
+// so a corrupted download never reaches disk.
+func (c *Chain) Fill(ctx context.Context, actionIDs [][]byte, hits []Hit) []Filled {
+	out := make([]Filled, len(hits))
+	// back[b] lists the objects to write back to backend b.
+	back := make([][]Stored, len(c.backends))
+	for i, h := range hits {
+		switch {
+		case h.Err != nil:
+			out[i].Err = h.Err
+		case h.Index == 0:
+			out[i].Path = h.path
+		default:
+			err := c.local.PutReader(ctx, actionIDs[i], h.Object, h.body)
+			h.body.Close()
+			if err != nil {
+				out[i].Err = err
+				continue
+			}
+			path := c.local.OutputFile(h.Object.OutputID)
+			out[i].Path = path
+			for b := 1; b < h.Index; b++ {
+				back[b] = append(back[b], Stored{ActionID: actionIDs[i], Object: h.Object, Path: path, index: i})
+			}
+		}
 	}
-	return path, c.Upload(ctx, actionID, obj, path)
+	for b, errs := range c.propagate(ctx, back) {
+		for j, err := range errs {
+			if err != nil {
+				i := back[b][j].index
+				out[i].Err = errors.Join(out[i].Err, err)
+			}
+		}
+	}
+	return out
 }
 
 // PutLocal stores body as the output of actionID in the local backend only
-// and returns its path.
+// and returns its path. go hands over one object at a time as a stream, so
+// local puts are not batched.
 func (c *Chain) PutLocal(ctx context.Context, actionID []byte, obj backend.Object, body io.Reader) (string, error) {
-	if err := c.local.Put(ctx, actionID, obj, body); err != nil {
+	if err := c.local.PutReader(ctx, actionID, obj, body); err != nil {
 		return "", err
 	}
 	return c.local.OutputFile(obj.OutputID), nil
 }
 
-// Upload stores the local file at path, already put with PutLocal, in every
-// non-local backend concurrently.
-func (c *Chain) Upload(ctx context.Context, actionID []byte, obj backend.Object, path string) error {
-	return c.propagate(ctx, actionID, obj, path, c.backends[1:])
+// Stored is an object already on local disk, as PutLocal or Fill left it.
+type Stored struct {
+	ActionID []byte
+	Object   backend.Object
+	Path     string
+
+	index int // position in the caller's batch, for Fill
 }
 
-// propagate writes the local file at path to each of targets concurrently;
-// every target opens the file itself, so a slow backend never stalls another.
-func (c *Chain) propagate(ctx context.Context, actionID []byte, obj backend.Object, path string, targets []backend.Backend) error {
-	errs := make([]error, len(targets))
+// Upload stores items, already on local disk, in every non-local backend
+// concurrently, one batch per backend. It returns one error per item,
+// joining what each backend answered for it; a backend whose whole call
+// failed contributes that error to every item. A *backend.RejectedError
+// in the join means a backend refused the item's kind.
+func (c *Chain) Upload(ctx context.Context, items []Stored) []error {
+	out := make([]error, len(items))
+	if len(c.backends) < 2 || len(items) == 0 {
+		return out
+	}
+	batches := make([][]Stored, len(c.backends))
+	for b := 1; b < len(c.backends); b++ {
+		batches[b] = items
+	}
+	for _, errs := range c.propagate(ctx, batches) {
+		for i, err := range errs {
+			if err != nil {
+				out[i] = errors.Join(out[i], err)
+			}
+		}
+	}
+	return out
+}
+
+// propagate puts batches[b] into backend b, for every b > 0 with a
+// non-empty batch, concurrently. Every item opens its local file only when
+// the backend sends it, so a slow backend never stalls another. It returns
+// one error per item of each batch.
+func (c *Chain) propagate(ctx context.Context, batches [][]Stored) [][]error {
+	out := make([][]error, len(batches))
 	var wg sync.WaitGroup
-	for i, b := range targets {
+	for b := 1; b < len(batches); b++ {
+		if len(batches[b]) == 0 {
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			f, err := os.Open(path)
-			if err != nil {
-				errs[i] = err
-				return
-			}
-			defer f.Close()
-			errs[i] = b.Put(ctx, actionID, obj, f)
+			out[b] = putStored(ctx, c.backends[b], batches[b])
 		}()
 	}
 	wg.Wait()
-	return errors.Join(errs...)
+	return out
+}
+
+func putStored(ctx context.Context, b backend.Backend, items []Stored) []error {
+	put := make([]backend.PutItem, len(items))
+	for i, it := range items {
+		path := it.Path
+		put[i] = backend.PutItem{
+			ActionID: it.ActionID,
+			Object:   it.Object,
+			Open:     func() (io.ReadCloser, error) { return os.Open(path) },
+		}
+	}
+	errs, err := b.Put(ctx, put)
+	if err != nil {
+		errs = make([]error, len(items))
+		for i := range errs {
+			errs[i] = err
+		}
+	}
+	return errs
 }

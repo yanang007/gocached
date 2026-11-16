@@ -9,8 +9,8 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -18,7 +18,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/client_golang/prometheus/push"
 
-	"github.com/yanang007/gocached/internal/kind"
 	"github.com/yanang007/gocached/internal/server"
 )
 
@@ -112,9 +111,10 @@ func startPush(cfg Config, reg *prometheus.Registry) func() {
 }
 
 type collectors struct {
-	requests *prometheus.CounterVec
-	bytes    *prometheus.CounterVec
-	duration *prometheus.HistogramVec
+	requests  *prometheus.CounterVec
+	bytes     *prometheus.CounterVec
+	duration  *prometheus.HistogramVec
+	batchSize *prometheus.HistogramVec
 }
 
 func newCollectors(reg prometheus.Registerer) *collectors {
@@ -122,30 +122,34 @@ func newCollectors(reg prometheus.Registerer) *collectors {
 	return &collectors{
 		requests: f.NewCounterVec(prometheus.CounterOpts{
 			Name: "gocached_requests_total",
-			Help: "Cache API requests by op (get/put), result (hit/miss on get; stored/skipped/corrupt/rejected/error on put) and the kind of a put object (empty when unknown).",
+			Help: "Cache objects handled, one per item of a batch request, by op (get/put), result (hit/miss on get; stored/skipped/corrupt/rejected/error on put) and the kind of a put object (empty when unknown).",
 		}, []string{"op", "result", "kind"}),
 		bytes: f.NewCounterVec(prometheus.CounterOpts{
 			Name: "gocached_bytes_total",
-			Help: "Object bytes transferred by direction (sent on get, received on put).",
+			Help: "Object content bytes by direction (sent on get hits, received on stored puts).",
 		}, []string{"direction"}),
 		duration: f.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "gocached_request_duration_seconds",
-			Help:    "Cache API request duration by op.",
+			Help:    "Batch request duration by op.",
 			Buckets: prometheus.DefBuckets,
+		}, []string{"op"}),
+		batchSize: f.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "gocached_batch_size",
+			Help:    "Objects handled per batch request by op; a request refused before its first object counts as 0.",
+			Buckets: prometheus.ExponentialBuckets(1, 2, 11), // 1 .. 1024
 		}, []string{"op"}),
 	}
 }
 
-// instrument observes /cache/ requests from the outside: the result comes
-// from the response status, bytes from the bodies that pass through.
+// instrument observes batch requests: per-object outcomes come from the
+// server's OnItem hook, the request itself from the outside.
 func (m *collectors) instrument(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var op string
 		switch {
-		case !strings.HasPrefix(r.URL.Path, "/cache/"):
-		case r.Method == http.MethodGet:
+		case r.Method == http.MethodPost && r.URL.Path == "/cache/batch-get":
 			op = "get"
-		case r.Method == http.MethodPut:
+		case r.Method == http.MethodPut && r.URL.Path == "/cache/batch":
 			op = "put"
 		}
 		if op == "" {
@@ -153,76 +157,20 @@ func (m *collectors) instrument(next http.Handler) http.Handler {
 			return
 		}
 		start := time.Now()
-		body := &countingBody{ReadCloser: r.Body}
-		r.Body = body
-		var k kind.Kind
-		corrupt := false
-		if op == "put" {
-			ctx := server.OnVerifyFailure(r.Context(), func() { corrupt = true })
-			r = r.WithContext(server.OnPutKind(ctx, func(got kind.Kind) { k = got }))
-		}
-		rw := &countingWriter{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(rw, r)
-
+		var items atomic.Int64
+		r = r.WithContext(server.OnItem(r.Context(), func(it server.Item) {
+			items.Add(1)
+			m.requests.WithLabelValues(it.Op, it.Result, string(it.Kind)).Inc()
+			if it.Bytes > 0 {
+				dir := "received"
+				if it.Op == "get" {
+					dir = "sent"
+				}
+				m.bytes.WithLabelValues(dir).Add(float64(it.Bytes))
+			}
+		}))
+		next.ServeHTTP(w, r)
 		m.duration.WithLabelValues(op).Observe(time.Since(start).Seconds())
-		res := result(op, rw.status)
-		if corrupt {
-			res = "corrupt"
-		}
-		m.requests.WithLabelValues(op, res, string(k)).Inc()
-		if op == "get" && rw.status == http.StatusOK {
-			m.bytes.WithLabelValues("sent").Add(float64(rw.n))
-		}
-		if op == "put" {
-			m.bytes.WithLabelValues("received").Add(float64(body.n))
-		}
+		m.batchSize.WithLabelValues(op).Observe(float64(items.Load()))
 	})
-}
-
-func result(op string, status int) string {
-	switch {
-	case op == "get" && status == http.StatusOK:
-		return "hit"
-	case op == "get" && status == http.StatusNotFound:
-		return "miss"
-	case op == "put" && status/100 == 2:
-		return "stored"
-	case op == "put" && status == http.StatusUnsupportedMediaType:
-		return "skipped"
-	case op == "put" && status == http.StatusBadRequest:
-		return "rejected"
-	}
-	return "error"
-}
-
-type countingBody struct {
-	io.ReadCloser
-	n int64
-}
-
-func (b *countingBody) Read(p []byte) (int, error) {
-	n, err := b.ReadCloser.Read(p)
-	b.n += int64(n)
-	return n, err
-}
-
-type countingWriter struct {
-	http.ResponseWriter
-	status      int
-	wroteHeader bool
-	n           int64
-}
-
-func (w *countingWriter) WriteHeader(code int) {
-	if !w.wroteHeader {
-		w.status, w.wroteHeader = code, true
-	}
-	w.ResponseWriter.WriteHeader(code)
-}
-
-func (w *countingWriter) Write(p []byte) (int, error) {
-	w.wroteHeader = true
-	n, err := w.ResponseWriter.Write(p)
-	w.n += int64(n)
-	return n, err
 }

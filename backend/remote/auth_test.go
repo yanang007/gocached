@@ -13,6 +13,7 @@ import (
 	"github.com/yanang007/gocached/backend/gocache"
 	"github.com/yanang007/gocached/backend/remote"
 	"github.com/yanang007/gocached/chain"
+	"github.com/yanang007/gocached/internal/backendtest"
 	"github.com/yanang007/gocached/internal/server"
 	"github.com/yanang007/gocached/internal/wire"
 )
@@ -37,7 +38,7 @@ func tokenClient(token string) *http.Client {
 func TestServerAnswers401WithoutCorrectToken(t *testing.T) {
 	srv := newTokenServer(t, "s3cret")
 	for _, auth := range []string{"", "Bearer guess", "Bearer s3cret2", "Bearer ", "Basic czNjcmV0", "s3cret"} {
-		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/cache/"+strings.Repeat("ab", 32), nil)
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/cache/batch-get", strings.NewReader(`["`+strings.Repeat("ab", 32)+`"]`))
 		if auth != "" {
 			req.Header.Set("Authorization", auth)
 		}
@@ -56,10 +57,10 @@ func TestCorrectTokenReadsAndWrites(t *testing.T) {
 	srv := newTokenServer(t, "s3cret")
 	r := remote.New(srv.URL, tokenClient("s3cret"))
 	id := actionID("auth-ok")
-	if err := r.Put(context.Background(), id, object("guarded"), strings.NewReader("guarded")); err != nil {
+	if err := backendtest.Put(context.Background(), r, id, object("guarded"), "guarded"); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	_, body, err := r.Get(context.Background(), id)
+	_, body, err := backendtest.Get(context.Background(), r, id)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -80,10 +81,10 @@ func TestWrongOrMissingTokenFailsRemoteBackend(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			r := remote.New(srv.URL, c)
 			id := actionID("auth-" + name)
-			if err := r.Put(context.Background(), id, object("x"), strings.NewReader("x")); err == nil {
+			if err := backendtest.Put(context.Background(), r, id, object("x"), "x"); err == nil {
 				t.Fatal("Put should fail without the right token")
 			}
-			if _, _, err := r.Get(context.Background(), id); err == nil || errors.Is(err, backend.ErrMiss) {
+			if _, _, err := backendtest.Get(context.Background(), r, id); err == nil || errors.Is(err, backend.ErrMiss) {
 				t.Fatalf("Get should be a failure, not a miss, got %v", err)
 			}
 		})

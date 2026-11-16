@@ -79,6 +79,13 @@ gocached: get=812 hit_local=3 hit_remote=790 miss=19 put=19 upload_ok=12 upload_
 | `GOCACHED_DRAIN_TIMEOUT` | `60s`                       | go 命令结束时，等待未完成上传的时间。 |
 | `GOCACHED_QUIET`         | 未设置                      | 设为 `1` 时不输出统计行。 |
 | `GOCACHED_SKIP_KINDS`    | `index`                     | 只保存在本地、不上传的条目类型（见[缓存条目类型](#缓存条目类型)）。 |
+| `GOCACHED_UPLOAD_BATCH_ITEMS`  | `256`      | 一次上传请求最多包含的对象数。 |
+| `GOCACHED_UPLOAD_BATCH_BYTES`  | `4194304`  | 一次上传请求最多包含的内容字节数（4 MiB）。 |
+| `GOCACHED_UPLOAD_SMALL_MAX`    | `1048576`  | 不小于此字节数（1 MiB）的对象单独上传，不参与批量。 |
+| `GOCACHED_UPLOAD_BATCH_DELAY`  | `10ms`     | 对象等待所在批次凑满的最长时间，超时后该批次直接发送。 |
+| `GOCACHED_UPLOAD_CONCURRENCY`  | `4`        | 同时进行的上传请求数。 |
+| `GOCACHED_UPLOAD_BUFFER_BYTES` | `67108864` | 等待上传的字节数（64 MiB）超过此值时，go 的 put 会阻塞，直到上传跟上。 |
+| `GOCACHED_UPLOAD_TIMEOUT`      | `30s`      | 每个上传请求的超时。 |
 
 ### 共享模式
 
@@ -107,14 +114,14 @@ GOCACHE=/path/to/cache go build std
 
 其他客户端变量（`GOCACHED_URL`、`GOCACHED_TOKEN` 等）在两种模式下都适用。
 
-时长可以写成 Go duration（`500ms`、`1m`）或纯秒数（`1.5`）。时长无效或不为正数时，`gocached` 启动即报错退出，不会回退到默认值。
+时长可以写成 Go duration（`500ms`、`1m`）或纯秒数（`1.5`）。数量和字节数写成正整数（`4194304`，不能写 `4MiB`）。取值无效或不为正数时，`gocached` 启动即报错退出，不会回退到默认值。
 
 ### 服务端变慢或宕机时的行为
 
 - **查询：** 远端 get 失败，或在 `GOCACHED_TIMEOUT` 内没有开始响应，按 miss 处理，由 go 自己编译。连续 3 次远端失败后，本次 go 命令的剩余时间里客户端不再访问服务端。下一个 go 命令会启动新的客户端，重新尝试。
 - **校验：** 下载内容按 sha256 output ID 校验，损坏的对象按 miss 处理。
-- **上传：** go 编译出的对象先写入本地目录，go 立即继续。上传在后台进行，最多同时 4 个，每个限时 30s。已有 4 个在进行时，下一个等待空位。上传失败计入 `upload_fail`，不会导致构建失败。
-- **被拒绝的类型：** 服务端不接受某个类型时返回 `415`。客户端将其计入 `skip` 和 `rejected`，不计入 `upload_fail`，也不会因此熔断，并在本次 go 命令的剩余时间里不再上传该类型。
+- **上传：** go 编译出的对象先写入本地目录，go 立即继续。上传在后台批量进行，让一次构建的大量小对象只占用少量请求：批次中的对象达到 `GOCACHED_UPLOAD_BATCH_ITEMS` 个或 `GOCACHED_UPLOAD_BATCH_BYTES` 字节，或第一个对象入队已过 `GOCACHED_UPLOAD_BATCH_DELAY` 时发送；不小于 `GOCACHED_UPLOAD_SMALL_MAX` 字节的对象单独发送。最多同时 `GOCACHED_UPLOAD_CONCURRENCY`（4）个请求，每个限时 `GOCACHED_UPLOAD_TIMEOUT`（30s）。等待上传的数据超过 `GOCACHED_UPLOAD_BUFFER_BYTES` 时，go 的下一个 put 等待腾出空间。上传失败计入 `upload_fail`，不会导致构建失败。
+- **被拒绝的类型：** 服务端不接受某个类型时，对该对象返回 `skipped`。客户端将其计入 `skip` 和 `rejected`，不计入 `upload_fail`，也不会因此熔断，并在本次 go 命令的剩余时间里不再上传该类型。
 - **go 命令结束：** 客户端最多等待 `GOCACHED_DRAIN_TIMEOUT`（60s）让未完成的上传结束（统计行中的 `drain=`），超时后丢弃剩余上传。
 
 ## 服务端
@@ -186,13 +193,18 @@ go build std
 | `GOCACHED_METRICS_PULL`  | 未设置                                    | 设为 `1` 时在 `/metrics` 提供 Prometheus 指标。 |
 | `GOCACHED_PUSHGATEWAY`   | 未设置                                    | Pushgateway 地址。设置后定期推送指标，退出时再推送一次。 |
 | `GOCACHED_PUSH_INTERVAL` | `15s`                                     | 推送间隔。 |
-| `GOCACHED_SKIP_KINDS`    | `index`                                   | 上传时以 `415` 拒绝的条目类型（见[缓存条目类型](#缓存条目类型)）。不影响 get。 |
+| `GOCACHED_SKIP_KINDS`    | `index`                                   | 上传时拒绝的条目类型（见[缓存条目类型](#缓存条目类型)）。不影响 get。 |
+| `GOCACHED_UPLOAD_BATCH_ITEMS` | `256`                                | 一次上传请求最多接受的对象数，超过时返回 `413`。变量名和默认值与客户端相同。 |
+| `GOCACHED_UPLOAD_BATCH_BYTES` | `4194304`                            | 一次上传请求最多接受的内容字节数，超过时返回 `413`。只含一个对象的请求可以超过此值。 |
 
 服务端不处理 TLS。需要加密传输时，请在前面加反向代理。
 
 ### 接口
 
-- `GET /cache/{actionID}` 和 `PUT /cache/{actionID}`：缓存接口（设置了 `GOCACHED_TOKEN` 时需要 token）。`PUT` 可以用 `?kind=<类型>` 声明类型；服务端跳过的类型以 `415` 拒绝，并带 `Gocached-Rejected-Kind` 响应头。上传内容与 output ID 不符，或 ID、请求头格式错误时返回 `400`；服务端写入失败（磁盘满、权限问题）返回 `500`。
+- `PUT /cache/batch` 和 `POST /cache/batch-get`：缓存接口（设置了 `GOCACHED_TOKEN` 时需要 token）。每个请求都携带一批对象；格式见 `internal/wire` 和 `docs/adr/0005-batched-wire-and-client-upload-queue.md`。
+  - `PUT /cache/batch` 的请求体是 `multipart/mixed`，每个对象一个 part，元数据放在 part 头 `Gocached-Action-Id`、`Gocached-Output-Id`、`Gocached-Size` 和可选的 `Gocached-Kind` 中。返回 `200` 和一个 JSON 数组，按顺序给出每个对象的结果：`stored`、`skipped`（类型被拒绝，类型名在 `kind` 中）、`corrupt`（内容与大小或 output ID 不符）、`rejected`（ID 格式错误）或 `error`（服务端写入失败，如磁盘满）。
+  - `POST /cache/batch-get` 的请求体是十六进制 action ID 的 JSON 数组（最多 1024 个），返回 `200` 和 `multipart/mixed` 响应体：先是命中项的 JSON 清单，然后每个命中项一个 part。不在清单里的 ID 即为 miss。
+  - 整个请求格式错误时返回 `400`，超过批次上限时返回 `413`。服务端按顺序处理各个 part，出错 part 之前的对象可能已经存储。客户端把 `413` 计为上传失败，但不会因此熔断，因为服务端本身正常；出现 `413` 说明客户端的批次上限大于服务端。
 - `GET /healthz`：存活检查，不需要 token。
 - `GET /metrics`：`GOCACHED_METRICS_PULL=1` 时提供 Prometheus 指标，不需要 token。
 
@@ -200,9 +212,10 @@ go build std
 
 | 指标                                | 标签 |
 | ----------------------------------- | ---- |
-| `gocached_requests_total`           | `op`（`get`、`put`）；`result`：get 为 `hit`、`miss`，put 为 `stored`、`skipped`（类型被拒绝）、`corrupt`（内容与 output ID 不符）、`rejected`（其他格式错误的请求）、`error`；`kind` 为 put 对象的类型，get 及类型尚未确定时为空 |
-| `gocached_bytes_total`              | `direction`（`sent`、`received`） |
-| `gocached_request_duration_seconds` | `op` |
+| `gocached_requests_total`           | 批次中每个对象计一次。`op`（`get`、`put`）；`result`：get 为 `hit`、`miss`，put 为各对象的结果 `stored`、`skipped`、`corrupt`、`rejected`、`error`；`kind` 为 put 对象的类型，get 及类型尚未确定时为空 |
+| `gocached_bytes_total`              | 对象内容字节数；`direction`（get 命中为 `sent`，put 存储成功为 `received`） |
+| `gocached_request_duration_seconds` | 每个 HTTP 请求计一次；`op` |
+| `gocached_batch_size`               | 每个 HTTP 请求包含的对象数；`op`。在处理第一个对象之前就被拒绝的请求计为 0。 |
 
 pull 和 push 都未开启时，不收集任何指标。
 
@@ -218,7 +231,7 @@ gocached 根据上传对象的开头字节识别它是什么：
 | `empty`   | 大小为 0 的对象，主要是没有输出的编译 stdout。 |
 | `other`   | 其他所有对象，例如测试输出、cgo 或 cover 生成的文件。 |
 
-`GOCACHED_SKIP_KINDS` 取逗号分隔的类型列表、`none` 或 `all`，在两端含义相同：客户端只在本地保存这些类型，服务端拒绝它们。默认值 `index` 让包索引不进入服务端：每个索引上传都要一次请求，其他机器却用不上。它们在本地照常命中。服务端设为 `all` 时停止接受所有上传，但 get 照常提供。类型名无效时，`gocached` 启动即报错退出。
+`GOCACHED_SKIP_KINDS` 取逗号分隔的类型列表、`none` 或 `all`，在两端含义相同：客户端只在本地保存这些类型，服务端拒绝它们。默认值 `index` 让包索引不进入服务端：上传它们占用带宽，其他机器却用不上。它们在本地照常命中。服务端设为 `all` 时停止接受所有上传，但 get 照常提供。类型名无效时，`gocached` 启动即报错退出。
 
 只有上传会被分类：get 只带 action ID，查询的统计方式不变。详见 `docs/adr/0004-entry-kinds-recognized-on-put-index-skipped-by-default.md` 和 `docs/research/go-cache-entry-kinds.md`。
 

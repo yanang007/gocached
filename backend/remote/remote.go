@@ -4,7 +4,6 @@ package remote
 
 import (
 	"context"
-	"io"
 	"net/http"
 
 	"github.com/yanang007/gocached/backend"
@@ -29,30 +28,31 @@ func New(baseURL string, client *http.Client) *Remote {
 	return &Remote{base: baseURL, client: client}
 }
 
-// Get implements backend.Backend. A 404 is backend.ErrMiss; transport
-// errors and any other status are failures. The returned object is what the
-// server claims; callers that write it to disk must verify the content.
-func (r *Remote) Get(ctx context.Context, actionID []byte) (backend.Object, io.ReadCloser, error) {
-	req, err := wire.NewGetRequest(ctx, r.base, actionID)
+// Get implements backend.Backend with one batch-get request. A transport
+// error or a bad response fails the whole call. The returned objects are
+// what the server claims; callers that write them to disk must verify the
+// content. The bodies share the response stream: read them in order.
+func (r *Remote) Get(ctx context.Context, actionIDs [][]byte) ([]backend.GetResult, error) {
+	req, err := wire.NewGetRequest(ctx, r.base, actionIDs)
 	if err != nil {
-		return backend.Object{}, nil, err
+		return nil, err
 	}
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return backend.Object{}, nil, err
+		return nil, err
 	}
-	return wire.ReadObject(resp)
+	return wire.ReadGetResponse(resp, actionIDs)
 }
 
-// Put implements backend.Backend.
-func (r *Remote) Put(ctx context.Context, actionID []byte, obj backend.Object, body io.Reader) error {
-	req, err := wire.NewPutRequest(ctx, r.base, actionID, obj, body)
+// Put implements backend.Backend with one batch PUT request.
+func (r *Remote) Put(ctx context.Context, items []backend.PutItem) ([]error, error) {
+	req, pb, err := wire.NewPutRequest(ctx, r.base, items)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return wire.ReadPutResponse(resp)
+	return wire.ReadPutResponse(resp, pb)
 }
