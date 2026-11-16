@@ -19,6 +19,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/push"
 
 	"github.com/yanang007/gocached/internal/server"
+	"github.com/yanang007/gocached/internal/wire"
 )
 
 // Config selects which metrics modes are enabled.
@@ -122,27 +123,31 @@ func newCollectors(reg prometheus.Registerer) *collectors {
 	return &collectors{
 		requests: f.NewCounterVec(prometheus.CounterOpts{
 			Name: "gocached_requests_total",
-			Help: "Cache objects handled, one per item of a batch request, by op (get/put), result (hit/miss on get; stored/skipped/corrupt/rejected/error on put) and the kind of a put object (empty when unknown).",
-		}, []string{"op", "result", "kind"}),
+			Help: "Cache objects handled, one per item of a batch request, by op (get/put), result (hit/miss on get; stored/skipped/corrupt/rejected/error on put) and the kind of a put object (empty when unknown)." + nodeTagHelp,
+		}, []string{"op", "result", "kind", "node_tag"}),
 		bytes: f.NewCounterVec(prometheus.CounterOpts{
 			Name: "gocached_bytes_total",
-			Help: "Object content bytes by direction (sent on get hits, received on stored puts).",
-		}, []string{"direction"}),
+			Help: "Object content bytes by direction (sent on get hits, received on stored puts)." + nodeTagHelp,
+		}, []string{"direction", "node_tag"}),
 		duration: f.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "gocached_request_duration_seconds",
-			Help:    "Batch request duration by op.",
+			Help:    "Batch request duration by op." + nodeTagHelp,
 			Buckets: prometheus.DefBuckets,
-		}, []string{"op"}),
+		}, []string{"op", "node_tag"}),
 		batchSize: f.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "gocached_batch_size",
-			Help:    "Objects handled per batch request by op; a request refused before its first object counts as 0.",
+			Help:    "Objects handled per batch request by op; a request refused before its first object counts as 0." + nodeTagHelp,
 			Buckets: prometheus.ExponentialBuckets(1, 2, 11), // 1 .. 1024
-		}, []string{"op"}),
+		}, []string{"op", "node_tag"}),
 	}
 }
 
+// nodeTagHelp is appended to every metric's help text.
+const nodeTagHelp = " node_tag is the client's Gocached-Node-Tag header: empty when absent, \"invalid\" when malformed."
+
 // instrument observes batch requests: per-object outcomes come from the
-// server's OnItem hook, the request itself from the outside.
+// server's OnItem hook, the request itself from the outside. Every series
+// carries the request's node tag.
 func (m *collectors) instrument(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var op string
@@ -157,20 +162,21 @@ func (m *collectors) instrument(next http.Handler) http.Handler {
 			return
 		}
 		start := time.Now()
+		tag := wire.NodeTagOf(r)
 		var items atomic.Int64
 		r = r.WithContext(server.OnItem(r.Context(), func(it server.Item) {
 			items.Add(1)
-			m.requests.WithLabelValues(it.Op, it.Result, string(it.Kind)).Inc()
+			m.requests.WithLabelValues(it.Op, it.Result, string(it.Kind), tag).Inc()
 			if it.Bytes > 0 {
 				dir := "received"
 				if it.Op == "get" {
 					dir = "sent"
 				}
-				m.bytes.WithLabelValues(dir).Add(float64(it.Bytes))
+				m.bytes.WithLabelValues(dir, tag).Add(float64(it.Bytes))
 			}
 		}))
 		next.ServeHTTP(w, r)
-		m.duration.WithLabelValues(op).Observe(time.Since(start).Seconds())
-		m.batchSize.WithLabelValues(op).Observe(float64(items.Load()))
+		m.duration.WithLabelValues(op, tag).Observe(time.Since(start).Seconds())
+		m.batchSize.WithLabelValues(op, tag).Observe(float64(items.Load()))
 	})
 }

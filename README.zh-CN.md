@@ -82,6 +82,7 @@ gocached: get=812 hit_local=3 hit_remote=790 miss=19 put=19 upload_ok=12 upload_
 | `GOCACHED_DIR`           | `<用户缓存目录>/gocached`   | 本地缓存目录，不存在时自动创建。Linux 上 `<用户缓存目录>` 是 `$XDG_CACHE_HOME` 或 `~/.cache`。 |
 | `GOCACHED_URL`           | 未设置                      | 服务端地址。未设置时只使用本地磁盘。 |
 | `GOCACHED_TOKEN`         | 未设置                      | 共享 token，以 `Authorization: Bearer <token>` 发送。 |
+| `GOCACHED_NODE_TAG`      | 未设置                      | 本节点或仓库的名称，如 `ci-linux/backend`，以 `Gocached-Node-Tag` 请求头发送。服务端将其记录为指标的 `node_tag` 标签，并写入错误日志。只允许字母、数字、`.`、`_`、`-` 和 `/`，最长 128 字节；否则 `gocached` 启动即报错退出。 |
 | `GOCACHED_TIMEOUT`       | `2s`                        | 远端 get 超时：等待服务端响应头的时间。读取响应体另有上限（30s）。 |
 | `GOCACHED_DRAIN_TIMEOUT` | `60s`                       | go 命令结束时，等待未完成上传的时间。 |
 | `GOCACHED_QUIET`         | 未设置                      | 设为 `1` 时不输出统计行。 |
@@ -223,6 +224,8 @@ go build std
 | `gocached_bytes_total`              | 对象内容字节数；`direction`（get 命中为 `sent`，put 存储成功为 `received`） |
 | `gocached_request_duration_seconds` | 每个 HTTP 请求计一次；`op` |
 | `gocached_batch_size`               | 每个 HTTP 请求包含的对象数；`op`。在处理第一个对象之前就被拒绝的请求计为 0。 |
+
+所有指标都带有 `node_tag` 标签：取客户端的 `GOCACHED_NODE_TAG`，客户端未设置时为空，请求头格式错误时为 `invalid`。每个不同的 tag 都会产生一组独立的时间序列，因此 tag 应取值有限，例如 runner 组或仓库名，不要用每个 job 的 ID。
 
 pull 和 push 都未开启时，不收集任何指标。
 

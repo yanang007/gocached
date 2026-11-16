@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -85,6 +86,16 @@ type Item struct {
 	Bytes  int64     // content bytes sent (get hit) or stored (put)
 }
 
+// logf logs a server-side problem with a request, naming the node tag the
+// request carries, if any.
+func logf(r *http.Request, format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if tag := wire.NodeTagOf(r); tag != "" {
+		msg += " (node_tag=" + tag + ")"
+	}
+	log.Print("gocached: " + msg)
+}
+
 type itemHookKey struct{}
 
 // OnItem returns a copy of ctx that makes the handler call f once for each
@@ -114,7 +125,7 @@ func (s *server) get(w http.ResponseWriter, r *http.Request) {
 	var out []wire.GetHit
 	for i, f := range filled {
 		if f.Err != nil && f.Path != "" {
-			log.Printf("gocached: fill %x: %v", ids[i], f.Err)
+			logf(r, "fill %x: %v", ids[i], f.Err)
 		}
 		if f.Path == "" {
 			report(ctx, Item{Op: "get", Result: "miss"})
@@ -130,7 +141,7 @@ func (s *server) get(w http.ResponseWriter, r *http.Request) {
 	if err := wire.WriteGetResponse(w, ids, out); err != nil {
 		// The response is already under way; cutting the connection makes
 		// the client see a broken stream instead of a short success.
-		log.Printf("gocached: batch-get: %v", err)
+		logf(r, "batch-get: %v", err)
 		panic(http.ErrAbortHandler)
 	}
 	for _, h := range out {
@@ -156,7 +167,7 @@ func (s *server) put(w http.ResponseWriter, r *http.Request) {
 			wire.WriteError(w, err)
 			return
 		}
-		res, path, reqErr := s.putItem(ctx, pr, part)
+		res, path, reqErr := s.putItem(r, pr, part)
 		if reqErr != nil {
 			wire.WriteError(w, reqErr)
 			return
@@ -174,7 +185,7 @@ func (s *server) put(w http.ResponseWriter, r *http.Request) {
 	// client's problem.
 	for i, err := range s.chain.Upload(ctx, stored) {
 		if err != nil {
-			log.Printf("gocached: put %x: %v", stored[i].ActionID, err)
+			logf(r, "put %x: %v", stored[i].ActionID, err)
 		}
 	}
 	wire.WritePutResults(w, results)
@@ -190,7 +201,8 @@ func storedBytes(res wire.PutResult, part wire.PutPart) int64 {
 // putItem stores one part locally and returns its result and local path.
 // res.Kind is the item's kind once known. A non-nil error fails the whole
 // request: the upload broke off or overran its declared sizes.
-func (s *server) putItem(ctx context.Context, pr *wire.PutReader, part wire.PutPart) (res wire.PutResult, path string, reqErr error) {
+func (s *server) putItem(r *http.Request, pr *wire.PutReader, part wire.PutPart) (res wire.PutResult, path string, reqErr error) {
+	ctx := r.Context()
 	if part.Err != nil {
 		return wire.PutResult{Result: wire.ResultRejected, Msg: part.Err.Error()}, "", nil
 	}
@@ -226,6 +238,6 @@ func (s *server) putItem(ctx context.Context, pr *wire.PutReader, part wire.PutP
 	case errors.Is(err, gocache.ErrInvalidID):
 		return wire.PutResult{Result: wire.ResultRejected, Kind: obj.Kind, Msg: err.Error()}, "", nil
 	}
-	log.Printf("gocached: put %x: %v", part.ActionID, err)
+	logf(r, "put %x: %v", part.ActionID, err)
 	return wire.PutResult{Result: wire.ResultError, Kind: obj.Kind, Msg: "storing object failed"}, "", nil
 }

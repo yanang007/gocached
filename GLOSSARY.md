@@ -28,6 +28,9 @@ A set of objects carried by one request, in either direction. Every backend call
 **Upload queue**:
 The client's collection of objects stored locally but not yet uploaded. It groups them into batches by count, size and delay, and slows go's puts down when too much is waiting.
 
+**Node tag**:
+An operator-chosen name for a client machine or repository, sent with every request so that the server's metrics and logs can tell clients apart.
+
 **Hit**:
 The first backend in a chain that holds the requested action ID, together with the object it holds.
 

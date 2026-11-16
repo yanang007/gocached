@@ -113,16 +113,16 @@ func exercise(t *testing.T, srv *httptest.Server) {
 
 // wantSeries are the series exercise must produce, in Prometheus text format.
 var wantSeries = []string{
-	`gocached_requests_total{kind="",op="get",result="hit"} 1`,
-	`gocached_requests_total{kind="",op="get",result="miss"} 1`,
-	`gocached_requests_total{kind="other",op="put",result="stored"} 1`,
-	`gocached_requests_total{kind="other",op="put",result="corrupt"} 1`,
-	`gocached_bytes_total{direction="sent"} 12`,
-	`gocached_bytes_total{direction="received"} 12`,
-	`gocached_request_duration_seconds_count{op="get"} 1`,
-	`gocached_request_duration_seconds_count{op="put"} 1`,
-	`gocached_batch_size_sum{op="get"} 2`,
-	`gocached_batch_size_sum{op="put"} 2`,
+	`gocached_requests_total{kind="",node_tag="",op="get",result="hit"} 1`,
+	`gocached_requests_total{kind="",node_tag="",op="get",result="miss"} 1`,
+	`gocached_requests_total{kind="other",node_tag="",op="put",result="stored"} 1`,
+	`gocached_requests_total{kind="other",node_tag="",op="put",result="corrupt"} 1`,
+	`gocached_bytes_total{direction="sent",node_tag=""} 12`,
+	`gocached_bytes_total{direction="received",node_tag=""} 12`,
+	`gocached_request_duration_seconds_count{node_tag="",op="get"} 1`,
+	`gocached_request_duration_seconds_count{node_tag="",op="put"} 1`,
+	`gocached_batch_size_sum{node_tag="",op="get"} 2`,
+	`gocached_batch_size_sum{node_tag="",op="put"} 2`,
 }
 
 func assertContains(t *testing.T, text string, want []string) {
@@ -173,8 +173,8 @@ func TestLocalWriteFailureIsErrorAndNotAVerifyFailure(t *testing.T) {
 
 	_, body := do(t, http.MethodGet, srv.URL+"/metrics", nil, "")
 	assertContains(t, body, []string{
-		`gocached_requests_total{kind="other",op="put",result="error"} 1`,
-		`gocached_requests_total{kind="",op="put",result="rejected"} 1`,
+		`gocached_requests_total{kind="other",node_tag="",op="put",result="error"} 1`,
+		`gocached_requests_total{kind="",node_tag="",op="put",result="rejected"} 1`,
 	})
 	if strings.Contains(body, `result="corrupt"`) {
 		t.Errorf("neither failure is a verify failure:\n%s", body)
@@ -197,12 +197,12 @@ func TestBrokenUploadIsNotCountedAsAnItem(t *testing.T) {
 	conn.Close()
 
 	// The handler may still be recording after the connection closed.
-	want := `gocached_request_duration_seconds_count{op="put"} 1`
+	want := `gocached_request_duration_seconds_count{node_tag="",op="put"} 1`
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		_, body := do(t, http.MethodGet, srv.URL+"/metrics", nil, "")
 		if strings.Contains(body, want) || time.Now().After(deadline) {
-			assertContains(t, body, []string{want, `gocached_batch_size_sum{op="put"} 0`})
+			assertContains(t, body, []string{want, `gocached_batch_size_sum{node_tag="",op="put"} 0`})
 			if strings.Contains(body, `gocached_requests_total{`) {
 				t.Errorf("a broken upload is not an item result:\n%s", body)
 			}
@@ -382,11 +382,49 @@ func TestPutKindsAreCountedAndSkipsAreNotRejections(t *testing.T) {
 	})
 	_, body := do(t, http.MethodGet, srv.URL+"/metrics", nil, "")
 	assertContains(t, body, []string{
-		`gocached_requests_total{kind="index",op="put",result="skipped"} 2`,
-		`gocached_requests_total{kind="archive",op="put",result="stored"} 1`,
-		`gocached_bytes_total{direction="received"} 8`,
+		`gocached_requests_total{kind="index",node_tag="",op="put",result="skipped"} 2`,
+		`gocached_requests_total{kind="archive",node_tag="",op="put",result="stored"} 1`,
+		`gocached_bytes_total{direction="received",node_tag=""} 8`,
 	})
 	if strings.Contains(body, `result="rejected"`) {
 		t.Errorf("a skipped kind must not count as rejected:\n%s", body)
 	}
+}
+
+func TestNodeTagLabelsEverySeries(t *testing.T) {
+	srv := startServer(t, metrics.Config{Pull: true})
+	ctx := context.Background()
+	for _, tag := range []string{"ci/repo-a", "bad tag"} {
+		c := &http.Client{Transport: headerRT{wire.HeaderNodeTag, tag}}
+		r := remote.New(srv.URL, c)
+		if err := backendtest.Put(ctx, r, actionID(tag), object(tag), tag); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := backendtest.Get(ctx, r, actionID(tag)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, body := do(t, http.MethodGet, srv.URL+"/metrics", nil, "")
+	for _, tag := range []string{"ci/repo-a", "invalid"} {
+		assertContains(t, body, []string{
+			`gocached_requests_total{kind="other",node_tag="` + tag + `",op="put",result="stored"} 1`,
+			`gocached_requests_total{kind="",node_tag="` + tag + `",op="get",result="hit"} 1`,
+			`gocached_bytes_total{direction="received",node_tag="` + tag + `"}`,
+			`gocached_request_duration_seconds_count{node_tag="` + tag + `",op="put"} 1`,
+			`gocached_batch_size_sum{node_tag="` + tag + `",op="get"} 1`,
+		})
+	}
+	if strings.Contains(body, "bad tag") {
+		t.Errorf("an invalid tag must not reach the labels:\n%s", body)
+	}
+}
+
+// headerRT sets one request header, like wire.NodeTagTransport but
+// without validating the value.
+type headerRT [2]string
+
+func (h headerRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.Header.Set(h[0], h[1])
+	return http.DefaultTransport.RoundTrip(req)
 }
