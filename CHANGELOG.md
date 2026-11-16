@@ -17,6 +17,7 @@ The wire protocol changes in a way that breaks compatibility with v0.3: client a
 ### Changed
 
 - **Breaking:** the cache API is `PUT /cache/batch` (`multipart/mixed`, per-object JSON results) and `POST /cache/batch-get`. `GET`/`PUT /cache/{actionID}` are removed, and so are `415` and `Gocached-Rejected-Kind`: a refused kind is the per-object result `skipped`. See ADR 0005.
+- **Breaking:** the stats line's `kinds=<kind>:<put>/<skipped>` is replaced by `upload_kinds(skipped/uploaded)=<kind>:<skipped>/<uploaded>`. Failed uploads count in neither number. See the README for each field.
 - **Breaking:** `gocached_requests_total` and `gocached_bytes_total` count objects, not requests; `gocached_bytes_total` counts content bytes of stored puts and get hits. `gocached_request_duration_seconds` is per batch request.
 
 ## [0.3.1] - 2026-11-15

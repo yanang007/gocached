@@ -59,10 +59,17 @@ go build -o bin/app ./cmd/app     # 构建命令不用改
 每个 go 命令结束时，`gocached prog` 会向 stderr 输出一行统计：
 
 ```
-gocached: get=812 hit_local=3 hit_remote=790 miss=19 put=19 upload_ok=12 upload_fail=0 skip=7 rejected=0 drain=41ms kinds=index:7/7,archive:6/0,empty:6/0
+gocached: get=812 hit_local=3 hit_remote=790 miss=19 put=19 upload_ok=12 upload_fail=0 skip=7 rejected=0 drain=41ms upload_kinds(skipped/uploaded)=index:7/0,archive:0/6,empty:0/6
 ```
 
-`skip` 统计因类型而只保存在本地、没有上传的对象（见[缓存条目类型](#缓存条目类型)），`rejected` 是其中被服务端拒绝的部分。`kinds=` 按类型列出 put 的对象数和其中被跳过的数量。
+`skip` 统计因类型而只保存在本地、没有上传的对象（见[缓存条目类型](#缓存条目类型)），`rejected` 是其中被服务端拒绝的部分。
+
+`upload_kinds(skipped/uploaded)=` 按类型拆分上传情况，格式为 `<类型>:<skipped>/<uploaded>`，字段名本身写明了顺序。示例中 7 个索引只保存在本地，6 个 archive 和 6 个空对象已上传。
+
+- `skipped`：该类型中没有上传的对象数，原因是 `GOCACHED_SKIP_KINDS` 包含该类型，或服务端拒绝了它。各类型之和等于 `skip`。
+- `uploaded`：该类型中上传成功的对象数。各类型之和等于 `upload_ok`。
+
+上传失败的对象两边都不计入，只计入 `upload_fail`。没有跳过也没有上传的类型不列出；一个都没有时（例如未设置 `GOCACHED_URL`）该字段为 `-`。
 
 在全新的 runner 上，`hit_remote` 接近 `get` 说明缓存生效。如果各 runner 的 `miss` 都很高，通常是 Go 版本、构建参数、工作路径或 `-o` 路径不一致（见上文）。
 

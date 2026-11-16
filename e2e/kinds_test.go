@@ -71,14 +71,15 @@ func goIn(t *testing.T, dir, cacheDir string, args []string, extraEnv ...string)
 	return stderr.String()
 }
 
-var kindsField = regexp.MustCompile(`kinds=(\S+)`)
+var kindsField = regexp.MustCompile(`upload_kinds\(skipped/uploaded\)=(\S+)`)
 
-// kindCounts parses the kinds= field of the stats line into kind -> [put, skip].
+// kindCounts parses the upload_kinds field of the stats line into
+// kind -> [skipped, uploaded].
 func kindCounts(t *testing.T, stderr string) map[string][2]int {
 	t.Helper()
 	m := kindsField.FindStringSubmatch(stderr)
 	if m == nil {
-		t.Fatalf("no kinds= field in stderr:\n%s", stderr)
+		t.Fatalf("no upload_kinds field in stderr:\n%s", stderr)
 	}
 	out := map[string][2]int{}
 	if m[1] == "-" {
@@ -86,10 +87,10 @@ func kindCounts(t *testing.T, stderr string) map[string][2]int {
 	}
 	for _, f := range strings.Split(m[1], ",") {
 		name, counts, _ := strings.Cut(f, ":")
-		put, skip, _ := strings.Cut(counts, "/")
-		p, _ := strconv.Atoi(put)
-		s, _ := strconv.Atoi(skip)
-		out[name] = [2]int{p, s}
+		skipped, uploaded, _ := strings.Cut(counts, "/")
+		s, _ := strconv.Atoi(skipped)
+		u, _ := strconv.Atoi(uploaded)
+		out[name] = [2]int{s, u}
 	}
 	return out
 }
@@ -134,22 +135,26 @@ func TestRealGoOutputIsClassifiedByKind(t *testing.T) {
 	test := goIn(t, mod, cacheDir, []string{"test", "./..."}, "GOCACHED_URL="+url)
 
 	b, tc := kindCounts(t, build), kindCounts(t, test)
-	for _, k := range []string{"index", "archive", "empty"} {
-		if b[k][0] == 0 {
-			t.Errorf("go build produced no %s puts, kinds %v", k, b)
+	// Default skip list: every index is kept local, everything else is
+	// uploaded.
+	if b["index"][0] == 0 || b["index"][1] != 0 {
+		t.Errorf("go build indexes should all be skipped, kinds %v", b)
+	}
+	for _, k := range []string{"archive", "empty"} {
+		if b[k][1] == 0 {
+			t.Errorf("go build uploaded no %s objects, kinds %v", k, b)
 		}
 	}
-	if tc["testlog"][0] == 0 {
-		t.Errorf("go test ./... produced no testlog puts, kinds %v", tc)
+	if tc["testlog"][1] == 0 {
+		t.Errorf("go test ./... uploaded no testlog objects, kinds %v", tc)
 	}
-	if tc["other"][0] == 0 {
-		t.Errorf("go test ./... should put its test output as other, kinds %v", tc)
+	if tc["other"][1] == 0 {
+		t.Errorf("go test ./... should upload its test output as other, kinds %v", tc)
 	}
-	// Default skip list: every index is kept local, nothing else is skipped.
 	for _, c := range []map[string][2]int{b, tc} {
 		for k, n := range c {
-			if want := map[bool]int{true: n[0], false: 0}[k == "index"]; n[1] != want {
-				t.Errorf("kind %s: put %d skipped %d, want %d skipped", k, n[0], n[1], want)
+			if k != "index" && n[0] != 0 {
+				t.Errorf("kind %s: %d skipped, want none", k, n[0])
 			}
 		}
 	}
@@ -207,7 +212,7 @@ func TestServerRejectsSkippedKindAndClientStopsUploadingIt(t *testing.T) {
 	if s["skip"] < s["rejected"] {
 		t.Fatalf("client should stop uploading the rejected kind, got %v", s)
 	}
-	if k["index"][1] != k["index"][0] || k["archive"][1] != 0 {
+	if k["index"][0] == 0 || k["index"][1] != 0 || k["archive"][0] != 0 {
 		t.Fatalf("only indexes should be skipped, kinds %v", k)
 	}
 	if n := storedPrefixes(t, serverDir)["index"]; n != 0 {

@@ -194,7 +194,7 @@ func (s *session) close() map[string]string {
 		s.t.Fatalf("no stats line in stderr:\n%s", s.stderr.String())
 	}
 	stats := map[string]string{}
-	for _, f := range regexp.MustCompile(`(\w+)=(\S+)`).FindAllStringSubmatch(m[1], -1) {
+	for _, f := range regexp.MustCompile(`([\w()/]+)=(\S+)`).FindAllStringSubmatch(m[1], -1) {
 		stats[f[1]] = f[2]
 	}
 	return stats
@@ -339,8 +339,8 @@ func TestSkippedKindIsStoredLocallyButNotUploaded(t *testing.T) {
 	if stats["put"] != "3" || stats["skip"] != "1" || stats["upload_ok"] != "2" || stats["rejected"] != "0" {
 		t.Fatalf("index should be skipped, the rest uploaded, got %v", stats)
 	}
-	if got := stats["kinds"]; got != "index:1/1,archive:1/0,empty:1/0" {
-		t.Fatalf("kinds = %q", got)
+	if got := stats[uploadKinds]; got != "index:1/0,archive:0/1,empty:0/1" {
+		t.Fatalf("%s = %q", uploadKinds, got)
 	}
 	// Uploads run concurrently, so their order is not fixed.
 	got := remote.uploaded()
@@ -386,7 +386,7 @@ func TestWithoutRemoteNothingIsSkipped(t *testing.T) {
 	s := start(t, prog.Options{Chain: chain.New(local), Skip: skip})
 	s.put(indexBody)
 	s.read()
-	if stats := s.close(); stats["skip"] != "0" || stats["kinds"] != "index:1/0" {
+	if stats := s.close(); stats["skip"] != "0" || stats[uploadKinds] != "-" {
 		t.Fatalf("with no remote there is nothing to skip, got %v", stats)
 	}
 }
@@ -408,6 +408,18 @@ func TestManySmallPutsUploadInFewBatches(t *testing.T) {
 	}
 }
 
+// uploadKinds is the name of the per-kind field of the stats line.
+const uploadKinds = "upload_kinds(skipped/uploaded)"
+
+func TestFailedUploadsCountInNeitherKindColumn(t *testing.T) {
+	s := start(t, prog.Options{Chain: newChain(t, failingRemote{})})
+	s.put("!<arch>\nfails to upload")
+	s.read()
+	if stats := s.close(); stats[uploadKinds] != "-" || stats["upload_fail"] != "1" {
+		t.Fatalf("a failed upload is neither skipped nor uploaded, got %v", stats)
+	}
+}
+
 func TestRejectionsWithinOneBatchAreAllSkips(t *testing.T) {
 	refuse, _ := kind.Parse("index")
 	remote := &kindRemote{refuse: refuse}
@@ -421,5 +433,8 @@ func TestRejectionsWithinOneBatchAreAllSkips(t *testing.T) {
 	stats := s.close()
 	if stats["skip"] != "2" || stats["rejected"] != "2" || stats["upload_ok"] != "1" || stats["upload_fail"] != "0" {
 		t.Fatalf("both indexes in the batch are refused, got %v", stats)
+	}
+	if got := stats[uploadKinds]; got != "index:2/0,other:0/1" {
+		t.Fatalf("%s = %q", uploadKinds, got)
 	}
 }

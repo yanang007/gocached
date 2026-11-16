@@ -59,10 +59,17 @@ go build -o bin/app ./cmd/app     # unchanged build commands
 At the end of each go command, `gocached prog` prints one line to stderr:
 
 ```
-gocached: get=812 hit_local=3 hit_remote=790 miss=19 put=19 upload_ok=12 upload_fail=0 skip=7 rejected=0 drain=41ms kinds=index:7/7,archive:6/0,empty:6/0
+gocached: get=812 hit_local=3 hit_remote=790 miss=19 put=19 upload_ok=12 upload_fail=0 skip=7 rejected=0 drain=41ms upload_kinds(skipped/uploaded)=index:7/0,archive:0/6,empty:0/6
 ```
 
-`skip` counts objects stored locally but not uploaded because of their kind (see [Entry kinds](#entry-kinds)), and `rejected` the part of those the server refused. `kinds=` lists, per kind, how many objects were put and how many of them were skipped.
+`skip` counts objects stored locally but not uploaded because of their kind (see [Entry kinds](#entry-kinds)), and `rejected` the part of those the server refused.
+
+`upload_kinds(skipped/uploaded)=` breaks uploads down by kind, as `<kind>:<skipped>/<uploaded>`; the field name spells out the order. In the example, 7 indexes were kept local and 6 archives and 6 empty objects were uploaded.
+
+- `skipped`: objects of that kind not uploaded, because `GOCACHED_SKIP_KINDS` lists the kind or the server refused it. Summed over kinds, this is `skip`.
+- `uploaded`: objects of that kind uploaded successfully. Summed over kinds, this is `upload_ok`.
+
+Failed uploads count in neither, only in `upload_fail`. Kinds with nothing skipped or uploaded are left out, and the field is `-` when there are none, for example without `GOCACHED_URL`.
 
 `hit_remote` close to `get` on a fresh runner means the cache works. A high `miss` across runners usually means the Go version, flags, working path or `-o` path differ (see above).
 
