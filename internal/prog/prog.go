@@ -89,8 +89,9 @@ type counters struct {
 	get, hitLocal, hitRemote, miss, put, uploadOK, uploadFail atomic.Int64
 	skip, rejected                                            atomic.Int64
 
-	// per kind, indexed like kind.All
-	kindPut, kindSkip [len(kind.All)]atomic.Int64
+	// per kind, indexed like kind.All: objects not uploaded (skipped by
+	// config or refused by a backend) and objects uploaded
+	kindSkip, kindUpload [len(kind.All)]atomic.Int64
 }
 
 // Run serves one go command's cache session until close or EOF on in.
@@ -169,7 +170,6 @@ func (s *session) Put(ctx context.Context, actionID, outputID []byte, size int64
 	}
 	obj.Kind = head.Kind()
 	i := obj.Kind.Index()
-	s.stats.kindPut[i].Add(1)
 	if s.opts.Chain.Len() > 1 && s.skips(obj.Kind) {
 		s.stats.skip.Add(1)
 		s.stats.kindSkip[i].Add(1)
@@ -256,6 +256,7 @@ func (s *session) finishUpload(actionID []byte, k kind.Kind, err error) {
 	s.pending--
 	if err == nil {
 		s.stats.uploadOK.Add(1)
+		s.stats.kindUpload[k.Index()].Add(1)
 		return
 	}
 	var rej *backend.RejectedError
@@ -300,18 +301,23 @@ func (s *session) printStats(w io.Writer, drain time.Duration) {
 		return
 	}
 	c := &s.stats
-	fmt.Fprintf(w, "gocached: get=%d hit_local=%d hit_remote=%d miss=%d put=%d upload_ok=%d upload_fail=%d skip=%d rejected=%d drain=%dms kinds=%s\n",
+	fmt.Fprintf(w, "gocached: get=%d hit_local=%d hit_remote=%d miss=%d put=%d upload_ok=%d upload_fail=%d skip=%d rejected=%d drain=%dms upload_kinds(skipped/uploaded)=%s\n",
 		c.get.Load(), c.hitLocal.Load(), c.hitRemote.Load(), c.miss.Load(), c.put.Load(),
-		c.uploadOK.Load(), c.uploadFail.Load(), c.skip.Load(), c.rejected.Load(), drain.Milliseconds(), c.kinds())
+		c.uploadOK.Load(), c.uploadFail.Load(), c.skip.Load(), c.rejected.Load(), drain.Milliseconds(), c.uploadKinds())
 }
 
-// kinds formats the per-kind put and skip counts as kind:put/skip for every
-// kind that was put, e.g. "index:120/120,archive:40/0", or "-" if none.
-func (c *counters) kinds() string {
+// uploadKinds formats, per kind, how many objects were not uploaded and
+// how many were, as kind:skipped/uploaded, e.g. "index:120/0,archive:0/40",
+// or "-" if there are none. skipped counts objects of that kind kept local
+// by GOCACHED_SKIP_KINDS or refused by the server; uploaded counts
+// successful uploads. Failed uploads count in neither, only in
+// upload_fail, so skipped+uploaded can be less than the kind's puts.
+func (c *counters) uploadKinds() string {
 	var parts []string
 	for i, k := range kind.All {
-		if n := c.kindPut[i].Load(); n > 0 {
-			parts = append(parts, fmt.Sprintf("%s:%d/%d", k, n, c.kindSkip[i].Load()))
+		skipped, uploaded := c.kindSkip[i].Load(), c.kindUpload[i].Load()
+		if skipped+uploaded > 0 {
+			parts = append(parts, fmt.Sprintf("%s:%d/%d", k, skipped, uploaded))
 		}
 	}
 	if len(parts) == 0 {
