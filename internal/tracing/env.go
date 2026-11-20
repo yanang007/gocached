@@ -22,13 +22,15 @@ type envConfig struct {
 	Attrs      attrs  `env:"GOCACHED_TRACE_ATTRS"`
 	NodeTag    string `env:"GOCACHED_NODE_TAG"`
 	File       string `env:"GOCACHED_TRACE_FILE"`
+	Skip       string `env:"GOCACHED_TRACE_SKIP"`
 }
 
 // ConfigFromEnviron builds a Config from environ (KEY=value pairs, as
 // os.Environ): session dir from GOCACHED_TRACE_SESSION_DIR, _BASE_DIR and
 // _KEY; service from OTEL_SERVICE_NAME; attributes from GOCACHED_TRACE_ATTRS
 // (k=v,...) plus gocached.node_tag from GOCACHED_NODE_TAG; exporters from
-// GOCACHED_TRACE_FILE and the OTEL_EXPORTER_OTLP_* variables. Warnings go to
+// GOCACHED_TRACE_FILE and the OTEL_EXPORTER_OTLP_* variables; span types to
+// drop from GOCACHED_TRACE_SKIP (comma list, see Skip). Warnings go to
 // warn. On error the returned Config is still usable with whatever parsed,
 // so callers can fail open.
 func ConfigFromEnviron(environ []string, warn io.Writer) (Config, error) {
@@ -50,6 +52,14 @@ func ConfigFromEnviron(environ []string, warn io.Writer) (Config, error) {
 		Service:    e.Service,
 		Attrs:      []Attr(e.Attrs),
 		Warn:       warn,
+	}
+	for _, typ := range strings.Split(e.Skip, ",") {
+		if typ = strings.TrimSpace(typ); typ != "" {
+			if c.skip == nil {
+				c.skip = map[string]bool{}
+			}
+			c.skip[typ] = true
+		}
 	}
 	if e.NodeTag != "" {
 		c.Attrs = MergeAttrs(c.Attrs, Attr{Key: NodeTagAttr, Value: e.NodeTag})
@@ -93,4 +103,10 @@ func (a *attrs) UnmarshalText(text []byte) error {
 	}
 	*a = out
 	return nil
+}
+
+// Skip reports whether spans of type spanType (such as "tool.compile" or
+// "prog.get.hit") are dropped by GOCACHED_TRACE_SKIP.
+func (c Config) Skip(spanType string) bool {
+	return c.skip[spanType]
 }

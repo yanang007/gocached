@@ -22,9 +22,16 @@
 //
 // Environment for toolexec:
 //
-//	GOCACHED_TRACE          if set (non-empty), each tool run is parsed and
-//	                        passed to the trace hooks; unset, the tool is run
-//	                        directly and nothing else is read
+//	GOCACHED_TRACE          if set (non-empty), each tool run is spooled as a
+//	                        tool span "<tool> <package>" under TRACEPARENT,
+//	                        with the trace variables above; no TRACEPARENT
+//	                        records nothing. Warnings go to warnings.log in
+//	                        the trace session dir, never to the tool's stderr.
+//	                        Unset, the tool is run directly and nothing else
+//	                        is read
+//	GOCACHED_TRACE_SKIP     comma-separated skip keys of tool spans not to
+//	                        record: tool.compile, tool.asm, tool.link,
+//	                        tool.cgo, tool.vet, tool.other
 //
 // Environment for both:
 //
@@ -99,6 +106,7 @@ import (
 	"github.com/yanang007/gocached/internal/prog"
 	"github.com/yanang007/gocached/internal/server"
 	"github.com/yanang007/gocached/internal/toolexec"
+	"github.com/yanang007/gocached/internal/tooltrace"
 	"github.com/yanang007/gocached/internal/tracecmd"
 	"github.com/yanang007/gocached/internal/wire"
 )
@@ -141,12 +149,18 @@ func tracingOn() bool { return os.Getenv(traceEnv) != "" }
 // Without GOCACHED_TRACE it reads no other config and only runs the tool
 // (ADR 0006).
 func runToolexec(args []string) int {
-	return toolexec.Run(args, toolexec.Options{
+	opts := toolexec.Options{
 		Trace:  tracingOn(),
 		Stdin:  os.Stdin,
 		Stdout: os.Stdout,
 		Stderr: os.Stderr,
-	})
+	}
+	if opts.Trace {
+		env := os.Environ()
+		opts.Hooks = tooltrace.Hooks(env)
+		opts.Warn = tooltrace.WarnLog(env)
+	}
+	return toolexec.Run(args, opts)
 }
 
 func runProg() error {

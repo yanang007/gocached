@@ -8,6 +8,16 @@ import (
 const (
 	// ExitCodeAttr is the exit code of a command run by `trace exec`.
 	ExitCodeAttr = "process.exit.code"
+
+	// ActionIDAttr carries an action ID in go's build ID form, on both tool
+	// spans and prog spans.
+	ActionIDAttr = "gocached.action_id"
+
+	// Tool span attributes.
+	ToolAttr         = "gocached.tool"
+	PackageAttr      = "gocached.package"
+	OutputAttr       = "gocached.output"
+	ToolExitCodeAttr = "gocached.exit_code"
 )
 
 // ExitStatus is the status of a span around a process that ended with exit

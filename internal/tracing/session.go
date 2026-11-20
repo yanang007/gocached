@@ -38,6 +38,8 @@ type Config struct {
 	// Warn receives warnings that do not stop the operation, such as a
 	// non-empty GOCACHED_TRACE_SESSION_DIR. Nil discards them.
 	Warn io.Writer
+
+	skip map[string]bool // span types from GOCACHED_TRACE_SKIP, see Skip
 }
 
 // DefaultBaseDir is <tmp>/gocached-trace.
@@ -196,9 +198,13 @@ func (c Config) EndStatus(cur trace.SpanContext, attrs []Attr, status Status) (p
 // closing spans still open now with status error, and then empties the
 // session. If an exporter fails, the spool is kept for a later export.
 func (c Config) Export(dir string) error {
+	c.printWarnings(dir)
 	sess, readErr := readSession(dir)
 	spans := sess.spans(time.Now())
 	if len(spans) == 0 {
+		if dir != c.SessionDir {
+			os.Remove(dir) // only succeeds when empty
+		}
 		return readErr
 	}
 	if len(c.Exporters) == 0 {

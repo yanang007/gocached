@@ -243,7 +243,7 @@ go splits `GOFLAGS` into flags at spaces unless a flag is quoted, so the whole `
 
 **Windows limitation.** With any `-toolexec` wrapper, go stops passing long tool arguments in `@` response files ([golang/go#70046](https://github.com/golang/go/issues/70046)). A package whose compile command line exceeds Windows' 32 KiB limit then fails with `The filename or extension is too long`. That needs a package with many files under a long path, such as a large generated SDK package (about 130 files) in a module cache path of over 100 characters. Keep `GOMODCACHE` and the checkout path short. Each tool run also costs about 55 ms more. See `docs/research/toolexec-windows.md`.
 
-Without `GOCACHED_TRACE` it only runs the tool and reads nothing else. With `GOCACHED_TRACE` set, it also parses each tool run (tool, package, outputs, build ID) for tracing; this release records nothing yet.
+Without `GOCACHED_TRACE` it only runs the tool and reads nothing else.
 
 ## Build tracing
 
@@ -279,6 +279,21 @@ Finished spans are written as OTLP JSON files into a trace session directory and
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `..._HEADERS`, `..._TIMEOUT` | Export to an OTLP/HTTP endpoint as JSON. gRPC is not supported. |
 
 Tracing never blocks or changes go's own build, even if every tracing part is broken (for example, a future go version that the parsing does not understand). A misused trace command (a bad flag, an unknown subcommand) fails with a non-zero exit. On runtime errors (a malformed `TRACEPARENT`, an unwritable directory, an unreachable collector) trace commands print a warning on stderr and exit 0, and `begin` and `end` print the unchanged `TRACEPARENT`. A `begin` that finds its own span still open from a crashed run with the same `GOCACHED_TRACE_KEY` warns and restarts it. See `docs/adr/0007-trace-context-in-traceparent-spans-in-a-spool.md`.
+
+### toolexec spans
+
+With `GOCACHED_TRACE` set (any non-empty value), [`gocached toolexec`](#toolexec-wrapper) writes each tool run to the trace session as one span, a child of the current `TRACEPARENT`, using the trace variables above. Wrap the build in a span so the tool spans have a parent and get exported with it:
+
+```sh
+export GOCACHED_TRACE=1 GOFLAGS="'-toolexec=gocached toolexec'"
+gocached trace exec -n build -- go build ./...   # or begin / go build / end --export
+```
+
+A span is named `<tool> <package>`, such as `compile example.com/p`, or just `<tool>` when go gives no package (`TOOLEXEC_IMPORTPATH`). It carries `gocached.tool`, `gocached.package`, `gocached.action_id` (the action ID from `-buildid`, as `go` prints it, for compile and link), `gocached.output` and `gocached.exit_code`; a failed tool has status error. A package that hits the cache runs no compile, so it has no compile span. The `-V=full` version probes are not recorded, and without a `TRACEPARENT` nothing is recorded.
+
+`GOCACHED_TRACE_SKIP` takes a comma list of skip keys not to record: `tool.compile`, `tool.asm`, `tool.link`, `tool.cgo`, `tool.vet`, and `tool.other` for any other tool, e.g. `GOCACHED_TRACE_SKIP=tool.vet,tool.other`.
+
+A tracing failure never fails the tool and never reaches its stderr: go caches a compile's or link's output and replays it on every cache hit. Warnings are appended to `warnings.log` in the trace session directory (up to 64 KiB, then one "further warnings dropped" line), and `trace export` prints them on its own stderr and removes the file. Without a session directory they are dropped. Only a tool that cannot be started is reported on stderr, and that build fails anyway.
 
 ## Entry kinds
 

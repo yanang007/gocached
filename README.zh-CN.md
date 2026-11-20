@@ -243,7 +243,7 @@ go 会在空格处把 `GOFLAGS` 拆成多个 flag，除非 flag 被引号括起�
 
 **Windows 限制。** 设置任何 `-toolexec` 包装器后，go 不再用 `@` 响应文件传递过长的工具参数（[golang/go#70046](https://github.com/golang/go/issues/70046)）。编译命令行超过 Windows 32 KiB 上限的包会以 `The filename or extension is too long` 失败。这需要一个文件很多、路径又很长的包，例如位于超过 100 个字符的模块缓存路径下的大型生成 SDK 包（约 130 个文件）。请让 `GOMODCACHE` 和检出路径保持简短。每次工具运行还会多花约 55 ms。见 `docs/research/toolexec-windows.md`。
 
-未设置 `GOCACHED_TRACE` 时，它只运行工具，不读取任何其他内容。设置 `GOCACHED_TRACE` 后，它还会解析每次工具运行（工具、包、输出、build ID）用于追踪；本版本尚不记录任何内容。
+未设置 `GOCACHED_TRACE` 时，它只运行工具，不读取任何其他内容。
 
 ## 构建追踪
 
@@ -279,6 +279,21 @@ export TRACEPARENT=$(gocached trace end --export)           # 回到 CI 的 span
 | `OTEL_EXPORTER_OTLP_ENDPOINT`、`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`、`..._HEADERS`、`..._TIMEOUT` | 以 JSON 导出到 OTLP/HTTP 端点。不支持 gRPC。 |
 
 追踪从不阻塞或改变 go 自身的构建，即使所有追踪组件都失效（例如未来的 go 版本让解析失效）也是如此。追踪命令的误用（错误的 flag、未知的子命令）会以非零状态退出。遇到运行时错误（`TRACEPARENT` 格式错误、目录不可写、收集器不可达）时，追踪命令在 stderr 打印警告并以 0 退出，`begin` 和 `end` 会原样打印 `TRACEPARENT`。`begin` 若发现同一 `GOCACHED_TRACE_KEY` 的崩溃运行留下的自身 span 仍处于打开状态，会给出警告并重新开始该 span。参见 `docs/adr/0007-trace-context-in-traceparent-spans-in-a-spool.md`。
+
+### toolexec span
+
+设置 `GOCACHED_TRACE`（任意非空值）后，[`gocached toolexec`](#toolexec-包装器) 会把每次工具运行作为一个 span 写入 trace 会话，作为当前 `TRACEPARENT` 的子 span，并使用上面的追踪变量。用一个 span 包住构建，工具 span 才有父 span 并随之导出：
+
+```sh
+export GOCACHED_TRACE=1 GOFLAGS="'-toolexec=gocached toolexec'"
+gocached trace exec -n build -- go build ./...   # 或 begin / go build / end --export
+```
+
+span 名为 `<tool> <package>`，例如 `compile example.com/p`；go 没有给出包（`TOOLEXEC_IMPORTPATH`）时只有 `<tool>`。它带有 `gocached.tool`、`gocached.package`、`gocached.action_id`（compile 和 link 的 `-buildid` 中的 action ID，与 `go` 打印的形式相同）、`gocached.output` 和 `gocached.exit_code`；工具失败时 span 状态为 error。命中缓存的包不会运行 compile，因此没有 compile span。`-V=full` 版本探测不会被记录，没有 `TRACEPARENT` 时也不记录任何内容。
+
+`GOCACHED_TRACE_SKIP` 接受逗号分隔的跳过键列表，列出的不记录：`tool.compile`、`tool.asm`、`tool.link`、`tool.cgo`、`tool.vet`，其他工具为 `tool.other`，例如 `GOCACHED_TRACE_SKIP=tool.vet,tool.other`。
+
+追踪失败绝不会让工具失败，也绝不会写入工具的 stderr：go 会缓存 compile 和 link 的输出，并在每次命中缓存时重放。警告会追加到 trace 会话目录中的 `warnings.log`（最多 64 KiB，之后追加一行 "further warnings dropped"），`trace export` 会在自己的 stderr 上打印它们并删除该文件。没有会话目录时警告被丢弃。只有无法启动的工具才会报告在 stderr 上，而这种情况下构建本来就会失败。
 
 ## 缓存条目类型
 
