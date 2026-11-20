@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-面向内网 CI 的自建 Go 构建缓存。一个二进制，两个子命令：
+面向内网 CI 的自建 Go 构建缓存。一个二进制，两个主要子命令（另有 [`gocached toolexec`](#toolexec-包装器)）：
 
 - `gocached prog` 是 [`GOCACHEPROG`](https://pkg.go.dev/cmd/go#hdr-Build_and_test_caching) 客户端。先查本地目录，再查 gocached 服务端。go 编译出的对象先写入本地，go 立即拿到结果，上传到服务端在后台进行。
 - `gocached serve` 是 HTTP 缓存服务，以 go 原生 `GOCACHE` 格式读写一个目录。
@@ -228,6 +228,20 @@ go build std
 所有指标都带有 `node_tag` 标签：取客户端的 `GOCACHED_NODE_TAG`，客户端未设置时为空，请求头格式错误时为 `invalid`。每个不同的 tag 都会产生一组独立的时间序列，因此 tag 应取值有限，例如 runner 组或仓库名，不要用每个 job 的 ID。
 
 pull 和 push 都未开启时，不收集任何指标。
+
+## Toolexec 包装器
+
+`gocached toolexec` 是一个 [`-toolexec`](https://pkg.go.dev/cmd/go#hdr-Build_flags) 包装器，构建追踪基于它实现。它运行 go 启动的每个工具（compile、link 等），参数、环境变量、输入、输出和退出码都保持不变，并原样转发每个工具的 `-V=full` 版本行，因此用与不用它的构建算出相同的 action ID，共用同一份缓存。gocached 不会替你设置 `GOFLAGS`：
+
+```sh
+export GOFLAGS="'-toolexec=gocached toolexec'"
+# 路径中含空格时：
+export GOFLAGS="'-toolexec=\"C:/Program Files/gocached/gocached.exe\" toolexec'"
+```
+
+go 会在空格处把 `GOFLAGS` 拆成多个 flag，除非 flag 被引号括起，所以整个 `-toolexec=...` 在变量值里需要再加一层引号。
+
+未设置 `GOCACHED_TRACE` 时，它只运行工具，不读取任何其他内容。设置 `GOCACHED_TRACE` 后，它还会解析每次工具运行（工具、包、输出、build ID）用于追踪；本版本尚不记录任何内容。
 
 ## 缓存条目类型
 

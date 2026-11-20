@@ -2,6 +2,14 @@
 //
 //	gocached prog    GOCACHEPROG client (set GOCACHEPROG="gocached prog")
 //	gocached serve   HTTP cache server over a GOCACHE-format directory
+//	gocached toolexec  -toolexec wrapper that runs each tool unchanged
+//	                 (set GOFLAGS="'-toolexec=gocached toolexec'")
+//
+// Environment for toolexec:
+//
+//	GOCACHED_TRACE          if set (non-empty), each tool run is parsed and
+//	                        passed to the trace hooks; unset, the tool is run
+//	                        directly and nothing else is read
 //
 // Environment for both:
 //
@@ -75,6 +83,7 @@ import (
 	"github.com/yanang007/gocached/chain"
 	"github.com/yanang007/gocached/internal/prog"
 	"github.com/yanang007/gocached/internal/server"
+	"github.com/yanang007/gocached/internal/toolexec"
 	"github.com/yanang007/gocached/internal/wire"
 )
 
@@ -84,6 +93,8 @@ func main() {
 	}
 	var err error
 	switch os.Args[1] {
+	case "toolexec":
+		os.Exit(runToolexec(os.Args[2:]))
 	case "prog":
 		err = runProg()
 	case "serve":
@@ -98,8 +109,26 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: gocached prog | gocached serve")
+	fmt.Fprintln(os.Stderr, "usage: gocached prog | gocached serve | gocached toolexec <tool> [args...]")
 	os.Exit(2)
+}
+
+// traceEnv turns on tool and prog spans when set to any non-empty value.
+const traceEnv = "GOCACHED_TRACE"
+
+// tracingOn reports whether traceEnv is set.
+func tracingOn() bool { return os.Getenv(traceEnv) != "" }
+
+// runToolexec runs one tool for go's -toolexec and returns its exit code.
+// Without GOCACHED_TRACE it reads no other config and only runs the tool
+// (ADR 0006).
+func runToolexec(args []string) int {
+	return toolexec.Run(args, toolexec.Options{
+		Trace:  tracingOn(),
+		Stdin:  os.Stdin,
+		Stdout: os.Stdout,
+		Stderr: os.Stderr,
+	})
 }
 
 func runProg() error {

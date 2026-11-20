@@ -2,7 +2,7 @@
 
 English | [简体中文](README.zh-CN.md)
 
-A self-hosted Go build cache for intranet CI. One binary, two subcommands:
+A self-hosted Go build cache for intranet CI. One binary, two main subcommands (plus [`gocached toolexec`](#toolexec-wrapper)):
 
 - `gocached prog` is a [`GOCACHEPROG`](https://pkg.go.dev/cmd/go#hdr-Build_and_test_caching) client. It looks up a local directory first, then a gocached server. Objects that go compiles are written locally, go gets its answer immediately, and the upload to the server runs in the background.
 - `gocached serve` is an HTTP cache server that reads and writes a directory in go's native `GOCACHE` format.
@@ -228,6 +228,20 @@ The server does not terminate TLS. Put it behind a reverse proxy if traffic need
 Every metric also has a `node_tag` label: the client's `GOCACHED_NODE_TAG`, empty when the client sets none, and `invalid` when the header is malformed. Each distinct tag adds its own series, so pick tags with a bounded set of values, such as runner groups or repositories, not per-job IDs.
 
 When neither pull nor push is enabled, no metrics are collected.
+
+## Toolexec wrapper
+
+`gocached toolexec` is a [`-toolexec`](https://pkg.go.dev/cmd/go#hdr-Build_flags) wrapper that build tracing builds on. It runs every tool go starts (compile, link, ...) with the same arguments, environment, input, output and exit code, and forwards each tool's `-V=full` version line unchanged, so builds with and without it compute the same action IDs and share one cache. gocached never sets `GOFLAGS` for you:
+
+```sh
+export GOFLAGS="'-toolexec=gocached toolexec'"
+# with a path that contains spaces:
+export GOFLAGS="'-toolexec=\"C:/Program Files/gocached/gocached.exe\" toolexec'"
+```
+
+go splits `GOFLAGS` into flags at spaces unless a flag is quoted, so the whole `-toolexec=...` flag needs its own quotes inside the variable.
+
+Without `GOCACHED_TRACE` it only runs the tool and reads nothing else. With `GOCACHED_TRACE` set, it also parses each tool run (tool, package, outputs, build ID) for tracing; this release records nothing yet.
 
 ## Entry kinds
 
