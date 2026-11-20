@@ -241,6 +241,8 @@ export GOFLAGS="'-toolexec=\"C:/Program Files/gocached/gocached.exe\" toolexec'"
 
 go splits `GOFLAGS` into flags at spaces unless a flag is quoted, so the whole `-toolexec=...` flag needs its own quotes inside the variable.
 
+**Windows limitation.** With any `-toolexec` wrapper, go stops passing long tool arguments in `@` response files ([golang/go#70046](https://github.com/golang/go/issues/70046)). A package whose compile command line exceeds Windows' 32 KiB limit then fails with `The filename or extension is too long`. That needs a package with many files under a long path, such as a large generated SDK package (about 130 files) in a module cache path of over 100 characters. Keep `GOMODCACHE` and the checkout path short. Each tool run also costs about 55 ms more. See `docs/research/toolexec-windows.md`.
+
 Without `GOCACHED_TRACE` it only runs the tool and reads nothing else. With `GOCACHED_TRACE` set, it also parses each tool run (tool, package, outputs, build ID) for tracing; this release records nothing yet.
 
 ## Entry kinds

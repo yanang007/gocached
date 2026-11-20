@@ -241,6 +241,8 @@ export GOFLAGS="'-toolexec=\"C:/Program Files/gocached/gocached.exe\" toolexec'"
 
 go 会在空格处把 `GOFLAGS` 拆成多个 flag，除非 flag 被引号括起，所以整个 `-toolexec=...` 在变量值里需要再加一层引号。
 
+**Windows 限制。** 设置任何 `-toolexec` 包装器后，go 不再用 `@` 响应文件传递过长的工具参数（[golang/go#70046](https://github.com/golang/go/issues/70046)）。编译命令行超过 Windows 32 KiB 上限的包会以 `The filename or extension is too long` 失败。这需要一个文件很多、路径又很长的包，例如位于超过 100 个字符的模块缓存路径下的大型生成 SDK 包（约 130 个文件）。请让 `GOMODCACHE` 和检出路径保持简短。每次工具运行还会多花约 55 ms。见 `docs/research/toolexec-windows.md`。
+
 未设置 `GOCACHED_TRACE` 时，它只运行工具，不读取任何其他内容。设置 `GOCACHED_TRACE` 后，它还会解析每次工具运行（工具、包、输出、build ID）用于追踪；本版本尚不记录任何内容。
 
 ## 缓存条目类型
