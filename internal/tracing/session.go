@@ -153,6 +153,11 @@ func (c Config) Begin(parent trace.SpanContext, name string, attrs []Attr) (trac
 // when cur is a root. outermost reports whether cur was the outermost span
 // of its session, the one whose end may export it.
 func (c Config) End(cur trace.SpanContext, attrs []Attr) (parent trace.SpanContext, outermost bool, err error) {
+	return c.EndStatus(cur, attrs, Status{})
+}
+
+// EndStatus is End that also sets the span's status.
+func (c Config) EndStatus(cur trace.SpanContext, attrs []Attr, status Status) (parent trace.SpanContext, outermost bool, err error) {
 	if !cur.IsValid() {
 		return trace.SpanContext{}, false, errors.New("no current span (TRACEPARENT is not set)")
 	}
@@ -171,6 +176,7 @@ func (c Config) End(cur trace.SpanContext, attrs []Attr) (parent trace.SpanConte
 	s := spans[0]
 	s.End = time.Now()
 	s.Attrs = MergeAttrs(s.Attrs, attrs...)
+	s.Status = status
 	if err := WriteSpool(dir, []Span{s}); err != nil {
 		return cur, false, err
 	}

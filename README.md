@@ -263,6 +263,7 @@ export TRACEPARENT=$(gocached trace end --export)           # back to the CI's s
 | `trace begin [-n name] [-s service] [-a k=v]...` | Opens a child of the current span (a new root without one) and prints its traceparent. |
 | `trace end [-a k=v]... [--export]` | Closes the current span and prints its parent's traceparent, empty at the root. `--export` also exports the session. |
 | `trace export [--all]` | Exports the current session, or with `--all` every session under the base dir. Spans still open are closed now with status error. |
+| `trace exec [-n name] [-s service] [-a k=v]... -- cmd [args...]` | Runs `cmd` in a child of the current span (`-n` defaults to `cmd`) with `TRACEPARENT` set to it, then closes the span with attribute `process.exit.code`, status error if it is not 0. Exports the session when the span is the outermost one, so nested `trace exec` calls and `trace exec` inside `begin`/`end` export once, at the top. Exits with `cmd`'s exit code (127 if it cannot start, 128+n if signal n kills it); interrupt and terminate signals are forwarded to `cmd`, and the span is still closed and exported. |
 
 Finished spans are written as OTLP JSON files into a trace session directory and stay there until exported, so spans of a killed job can be exported later. Exporting empties the directory; if the exporter fails, the files are kept.
 

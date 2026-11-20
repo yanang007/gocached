@@ -1,7 +1,8 @@
-// Package tracecmd implements `gocached trace begin|end|export` (ADR 0007).
-// Every command fails open: it warns on stderr and exits 0 on its own
-// errors, and begin and end print the unchanged TRACEPARENT when they
-// cannot open or close a span.
+// Package tracecmd implements `gocached trace begin|end|export|exec` (ADR
+// 0007). Usage errors (bad flags, unknown command) exit 2. Otherwise every
+// command fails open: it warns on stderr and exits 0 on its own errors
+// (exec exits with its command's code), and begin and end print the
+// unchanged TRACEPARENT when they cannot open or close a span.
 package tracecmd
 
 import (
@@ -17,14 +18,17 @@ import (
 
 // Options configures Run.
 type Options struct {
-	Environ        []string // the command's environment, as os.Environ
+	Environ        []string  // the command's environment, as os.Environ
+	Stdin          io.Reader // passed to the command of `trace exec`
 	Stdout, Stderr io.Writer
 }
 
-const usage = "usage: gocached trace begin [-n name] [-s service] [-a k=v]... | end [-a k=v]... [--export] | export [--all]"
+const usage = "usage: gocached trace begin [-n name] [-s service] [-a k=v]... | end [-a k=v]... [--export] | export [--all] | exec [-n name] [-s service] [-a k=v]... -- cmd [args...]"
 
-// Run runs `gocached trace args...` and returns its exit code: 0 except
-// for a usage error.
+// Run runs `gocached trace args...` and returns its exit code. A usage
+// error (bad flags, unknown command) is misuse and exits 2. Runtime errors
+// of tracing only warn: begin, end and export then exit 0, and exec exits
+// with its command's code.
 func Run(args []string, opts Options) int {
 	if len(args) == 0 {
 		fmt.Fprintln(opts.Stderr, usage)
@@ -37,6 +41,8 @@ func Run(args []string, opts Options) int {
 		return end(args[1:], opts)
 	case "export":
 		return export(args[1:], opts)
+	case "exec":
+		return execCmd(args[1:], opts)
 	default:
 		fmt.Fprintf(opts.Stderr, "gocached trace: unknown command %q\n%s\n", args[0], usage)
 		return 2
@@ -130,6 +136,12 @@ func Begin(environ []string, sf SpanFlags, stderr io.Writer) (string, error) {
 // together with the parent's traceparent. On a failure to close, End
 // returns environ's TRACEPARENT unchanged.
 func End(environ []string, attrs []tracing.Attr, export bool, stderr io.Writer) (string, error) {
+	return closeSpan("end", environ, attrs, tracing.Status{}, func(bool) bool { return export }, stderr)
+}
+
+// closeSpan is End with a status, and export decided from whether the span
+// was the outermost of its session.
+func closeSpan(cmd string, environ []string, attrs []tracing.Attr, status tracing.Status, export func(outermost bool) bool, stderr io.Writer) (string, error) {
 	unchanged := lookup(environ, tracectx.TraceparentEnv)
 	cur, err := tracectx.FromEnviron(environ)
 	if err != nil {
@@ -137,14 +149,14 @@ func End(environ []string, attrs []tracing.Attr, export bool, stderr io.Writer) 
 	}
 	cfg, cfgErr := tracing.ConfigFromEnviron(environ, stderr)
 	if cfgErr != nil {
-		warn(stderr, "end", cfgErr)
+		warn(stderr, cmd, cfgErr)
 	}
-	parent, _, err := cfg.End(cur, attrs)
+	parent, outermost, err := cfg.EndStatus(cur, attrs, status)
 	if err != nil {
 		return unchanged, err
 	}
 	tp := tracectx.Traceparent(parent)
-	if export {
+	if export(outermost) {
 		return tp, cfg.Export(cfg.SessionDirFor(cur.TraceID()))
 	}
 	return tp, nil

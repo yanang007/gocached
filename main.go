@@ -4,9 +4,11 @@
 //	gocached serve   HTTP cache server over a GOCACHE-format directory
 //	gocached toolexec  -toolexec wrapper that runs each tool unchanged
 //	                 (set GOFLAGS="'-toolexec=gocached toolexec'")
-//	gocached trace   begin, end and export build trace spans (ADR 0007)
+//	gocached trace   begin, end and export build trace spans, or exec a
+//	                 command in one (ADR 0007)
 //
-// Environment for trace (begin, end and export always exit 0; see README):
+// Environment for trace (usage errors exit 2; on runtime errors begin, end
+// and export warn and exit 0, and exec exits with its command; see README):
 //
 //	TRACEPARENT, TRACESTATE the current span; begin and end print the new one
 //	GOCACHED_TRACE_KEY      derives the outermost span ID, the trace ID
@@ -108,7 +110,7 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "trace":
-		os.Exit(tracecmd.Run(os.Args[2:], tracecmd.Options{Environ: os.Environ(), Stdout: os.Stdout, Stderr: os.Stderr}))
+		os.Exit(tracecmd.Run(os.Args[2:], tracecmd.Options{Environ: os.Environ(), Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}))
 	case "toolexec":
 		os.Exit(runToolexec(os.Args[2:]))
 	case "prog":
@@ -125,7 +127,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: gocached prog | gocached serve | gocached toolexec <tool> [args...] | gocached trace begin|end|export")
+	fmt.Fprintln(os.Stderr, "usage: gocached prog | gocached serve | gocached toolexec <tool> [args...] | gocached trace begin|end|export|exec")
 	os.Exit(2)
 }
 

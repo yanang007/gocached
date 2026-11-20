@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `gocached trace begin|end|export`: open and close build trace spans from a CI script (`export TRACEPARENT=$(gocached trace begin -n build)`), with flags `-n`, `-s` and repeatable `-a k=v`. The current span is the standard `TRACEPARENT`/`TRACESTATE`; an incoming one is the parent. `GOCACHED_TRACE_KEY` makes the outermost span ID (and, without a parent, the trace ID) repeatable. Spans are spooled as OTLP JSON in a trace session directory (`GOCACHED_TRACE_SESSION_DIR`, or `GOCACHED_TRACE_BASE_DIR`, default `<tmp>/gocached-trace`) and exported by `trace end --export` or `trace export [--all]` to `GOCACHED_TRACE_FILE` and/or an OTLP/HTTP endpoint (`OTEL_EXPORTER_OTLP_*`). Service and attributes default from `OTEL_SERVICE_NAME`, `GOCACHED_TRACE_ATTRS` and `GOCACHED_NODE_TAG`. Trace commands fail only on misuse (bad flags, unknown subcommand); on runtime errors they warn and exit 0, and tracing never blocks or changes go's own build. See ADR 0007.
+- `gocached trace exec [-n name] [-s service] [-a k=v]... -- cmd [args...]`: runs one command in a span (status error and `process.exit.code` on failure), exports at the outermost level, forwards interrupt and terminate signals and exits with the command's exit code.
 
 ## [0.4.0] - 2026-11-17
 
