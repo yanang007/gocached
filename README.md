@@ -2,7 +2,7 @@
 
 English | [简体中文](README.zh-CN.md)
 
-A self-hosted Go build cache for intranet CI. One binary, two main subcommands (plus [`gocached toolexec`](#toolexec-wrapper)):
+A self-hosted Go build cache for intranet CI. One binary, two main subcommands (plus [`gocached toolexec`](#toolexec-wrapper) and [`gocached trace`](#build-tracing)):
 
 - `gocached prog` is a [`GOCACHEPROG`](https://pkg.go.dev/cmd/go#hdr-Build_and_test_caching) client. It looks up a local directory first, then a gocached server. Objects that go compiles are written locally, go gets its answer immediately, and the upload to the server runs in the background.
 - `gocached serve` is an HTTP cache server that reads and writes a directory in go's native `GOCACHE` format.
@@ -244,6 +244,40 @@ go splits `GOFLAGS` into flags at spaces unless a flag is quoted, so the whole `
 **Windows limitation.** With any `-toolexec` wrapper, go stops passing long tool arguments in `@` response files ([golang/go#70046](https://github.com/golang/go/issues/70046)). A package whose compile command line exceeds Windows' 32 KiB limit then fails with `The filename or extension is too long`. That needs a package with many files under a long path, such as a large generated SDK package (about 130 files) in a module cache path of over 100 characters. Keep `GOMODCACHE` and the checkout path short. Each tool run also costs about 55 ms more. See `docs/research/toolexec-windows.md`.
 
 Without `GOCACHED_TRACE` it only runs the tool and reads nothing else. With `GOCACHED_TRACE` set, it also parses each tool run (tool, package, outputs, build ID) for tracing; this release records nothing yet.
+
+## Build tracing
+
+`gocached trace` records spans from a CI script and exports them to an OpenTelemetry backend. The current span is the standard `TRACEPARENT` (and `TRACESTATE`) environment variable, so each shell, or each `&` job, has its own, and a `TRACEPARENT` set by the CI system becomes the parent:
+
+```sh
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318   # or GOCACHED_TRACE_FILE=trace.jsonl
+export TRACEPARENT=$(gocached trace begin -n build -a repo=gocached)
+export TRACEPARENT=$(gocached trace begin -n test)
+go test ./...
+export TRACEPARENT=$(gocached trace end)                    # back to "build"
+export TRACEPARENT=$(gocached trace end --export)           # back to the CI's span, or empty
+```
+
+| Command | What it does |
+| ------- | ------------ |
+| `trace begin [-n name] [-s service] [-a k=v]...` | Opens a child of the current span (a new root without one) and prints its traceparent. |
+| `trace end [-a k=v]... [--export]` | Closes the current span and prints its parent's traceparent, empty at the root. `--export` also exports the session. |
+| `trace export [--all]` | Exports the current session, or with `--all` every session under the base dir. Spans still open are closed now with status error. |
+
+Finished spans are written as OTLP JSON files into a trace session directory and stay there until exported, so spans of a killed job can be exported later. Exporting empties the directory; if the exporter fails, the files are kept.
+
+| Variable | Meaning |
+| -------- | ------- |
+| `OTEL_SERVICE_NAME` | Service of new spans; `-s` overrides it. |
+| `GOCACHED_TRACE_ATTRS` | Attributes of new spans, `k=v,...`; `-a` adds or overrides. |
+| `GOCACHED_NODE_TAG` | Added to new spans as attribute `gocached.node_tag`. |
+| `GOCACHED_TRACE_KEY` | Any string, such as a job ID. The outermost span's ID, and without an incoming `TRACEPARENT` the trace ID, are derived from it, so a rerun of the same job finds its span. It also names the session directory. Inner span IDs are random. |
+| `GOCACHED_TRACE_SESSION_DIR` | Session directory used as is (with a warning if it is not empty). |
+| `GOCACHED_TRACE_BASE_DIR` | Parent of the session directories (default `<tmp>/gocached-trace`), each named after the hash of `GOCACHED_TRACE_KEY` or after the trace ID. |
+| `GOCACHED_TRACE_FILE` | Export by appending one OTLP JSON document per export to this file. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `..._HEADERS`, `..._TIMEOUT` | Export to an OTLP/HTTP endpoint as JSON. gRPC is not supported. |
+
+Tracing never blocks or changes go's own build, even if every tracing part is broken (for example, a future go version that the parsing does not understand). A misused trace command (a bad flag, an unknown subcommand) fails with a non-zero exit. On runtime errors (a malformed `TRACEPARENT`, an unwritable directory, an unreachable collector) trace commands print a warning on stderr and exit 0, and `begin` and `end` print the unchanged `TRACEPARENT`. A `begin` that finds its own span still open from a crashed run with the same `GOCACHED_TRACE_KEY` warns and restarts it. See `docs/adr/0007-trace-context-in-traceparent-spans-in-a-spool.md`.
 
 ## Entry kinds
 

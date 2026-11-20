@@ -4,6 +4,19 @@
 //	gocached serve   HTTP cache server over a GOCACHE-format directory
 //	gocached toolexec  -toolexec wrapper that runs each tool unchanged
 //	                 (set GOFLAGS="'-toolexec=gocached toolexec'")
+//	gocached trace   begin, end and export build trace spans (ADR 0007)
+//
+// Environment for trace (begin, end and export always exit 0; see README):
+//
+//	TRACEPARENT, TRACESTATE the current span; begin and end print the new one
+//	GOCACHED_TRACE_KEY      derives the outermost span ID, the trace ID
+//	                        without TRACEPARENT, and the session dir name
+//	GOCACHED_TRACE_SESSION_DIR  session dir, used as is
+//	GOCACHED_TRACE_BASE_DIR parent of session dirs (default <tmp>/gocached-trace)
+//	GOCACHED_TRACE_FILE     export by appending OTLP JSON to this file
+//	OTEL_EXPORTER_OTLP_*    export to an OTLP/HTTP endpoint
+//	OTEL_SERVICE_NAME, GOCACHED_TRACE_ATTRS, GOCACHED_NODE_TAG  defaults
+//	                        for new spans
 //
 // Environment for toolexec:
 //
@@ -84,6 +97,7 @@ import (
 	"github.com/yanang007/gocached/internal/prog"
 	"github.com/yanang007/gocached/internal/server"
 	"github.com/yanang007/gocached/internal/toolexec"
+	"github.com/yanang007/gocached/internal/tracecmd"
 	"github.com/yanang007/gocached/internal/wire"
 )
 
@@ -93,6 +107,8 @@ func main() {
 	}
 	var err error
 	switch os.Args[1] {
+	case "trace":
+		os.Exit(tracecmd.Run(os.Args[2:], tracecmd.Options{Environ: os.Environ(), Stdout: os.Stdout, Stderr: os.Stderr}))
 	case "toolexec":
 		os.Exit(runToolexec(os.Args[2:]))
 	case "prog":
@@ -109,7 +125,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: gocached prog | gocached serve | gocached toolexec <tool> [args...]")
+	fmt.Fprintln(os.Stderr, "usage: gocached prog | gocached serve | gocached toolexec <tool> [args...] | gocached trace begin|end|export")
 	os.Exit(2)
 }
 

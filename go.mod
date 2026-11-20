@@ -5,6 +5,9 @@ go 1.25.0
 require (
 	github.com/caarlos0/env/v11 v11.3.1
 	github.com/prometheus/client_golang v1.23.2
+	go.opentelemetry.io/contrib/propagators/envcar v0.71.0
+	go.opentelemetry.io/otel v1.46.0
+	go.opentelemetry.io/otel/trace v1.46.0
 	golang.org/x/sync v0.19.0
 )
 

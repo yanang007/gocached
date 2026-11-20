@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-面向内网 CI 的自建 Go 构建缓存。一个二进制，两个主要子命令（另有 [`gocached toolexec`](#toolexec-包装器)）：
+面向内网 CI 的自建 Go 构建缓存。一个二进制，两个主要子命令（另有 [`gocached toolexec`](#toolexec-包装器) 和 [`gocached trace`](#构建追踪)）：
 
 - `gocached prog` 是 [`GOCACHEPROG`](https://pkg.go.dev/cmd/go#hdr-Build_and_test_caching) 客户端。先查本地目录，再查 gocached 服务端。go 编译出的对象先写入本地，go 立即拿到结果，上传到服务端在后台进行。
 - `gocached serve` 是 HTTP 缓存服务，以 go 原生 `GOCACHE` 格式读写一个目录。
@@ -244,6 +244,40 @@ go 会在空格处把 `GOFLAGS` 拆成多个 flag，除非 flag 被引号括起�
 **Windows 限制。** 设置任何 `-toolexec` 包装器后，go 不再用 `@` 响应文件传递过长的工具参数（[golang/go#70046](https://github.com/golang/go/issues/70046)）。编译命令行超过 Windows 32 KiB 上限的包会以 `The filename or extension is too long` 失败。这需要一个文件很多、路径又很长的包，例如位于超过 100 个字符的模块缓存路径下的大型生成 SDK 包（约 130 个文件）。请让 `GOMODCACHE` 和检出路径保持简短。每次工具运行还会多花约 55 ms。见 `docs/research/toolexec-windows.md`。
 
 未设置 `GOCACHED_TRACE` 时，它只运行工具，不读取任何其他内容。设置 `GOCACHED_TRACE` 后，它还会解析每次工具运行（工具、包、输出、build ID）用于追踪；本版本尚不记录任何内容。
+
+## 构建追踪
+
+`gocached trace` 在 CI 脚本中记录 span，并导出到 OpenTelemetry 后端。当前 span 就是标准的 `TRACEPARENT`（及 `TRACESTATE`）环境变量，因此每个 shell 或每个 `&` 后台任务各有自己的当前 span；CI 系统设置的 `TRACEPARENT` 会成为父 span：
+
+```sh
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318   # 或 GOCACHED_TRACE_FILE=trace.jsonl
+export TRACEPARENT=$(gocached trace begin -n build -a repo=gocached)
+export TRACEPARENT=$(gocached trace begin -n test)
+go test ./...
+export TRACEPARENT=$(gocached trace end)                    # 回到 "build"
+export TRACEPARENT=$(gocached trace end --export)           # 回到 CI 的 span，或为空
+```
+
+| 命令 | 作用 |
+| ---- | ---- |
+| `trace begin [-n name] [-s service] [-a k=v]...` | 在当前 span 下开启一个子 span（没有当前 span 时开启新的根 span），并打印它的 traceparent。 |
+| `trace end [-a k=v]... [--export]` | 关闭当前 span，打印其父 span 的 traceparent，在根 span 处为空。`--export` 同时导出该会话。 |
+| `trace export [--all]` | 导出当前会话；加 `--all` 时导出基目录下的所有会话。仍未关闭的 span 在此时以错误状态关闭。 |
+
+已结束的 span 以 OTLP JSON 文件写入追踪会话目录，在导出前一直保留，所以被杀掉的任务的 span 也能事后导出。导出会清空该目录；导出器失败时文件保留。
+
+| 变量 | 含义 |
+| ---- | ---- |
+| `OTEL_SERVICE_NAME` | 新 span 的服务名；`-s` 覆盖它。 |
+| `GOCACHED_TRACE_ATTRS` | 新 span 的属性，格式 `k=v,...`；`-a` 追加或覆盖。 |
+| `GOCACHED_NODE_TAG` | 作为属性 `gocached.node_tag` 加到新 span 上。 |
+| `GOCACHED_TRACE_KEY` | 任意字符串，例如任务 ID。最外层 span 的 ID（以及没有传入 `TRACEPARENT` 时的 trace ID）由它派生，因此同一任务重跑时能找到自己的 span；它也决定会话目录名。内层 span 的 ID 是随机的。 |
+| `GOCACHED_TRACE_SESSION_DIR` | 原样使用的会话目录（非空时给出警告）。 |
+| `GOCACHED_TRACE_BASE_DIR` | 会话目录的上级目录（默认 `<tmp>/gocached-trace`），每个会话目录以 `GOCACHED_TRACE_KEY` 的哈希或 trace ID 命名。 |
+| `GOCACHED_TRACE_FILE` | 导出到此文件，每次导出追加一个 OTLP JSON 文档。 |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`、`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`、`..._HEADERS`、`..._TIMEOUT` | 以 JSON 导出到 OTLP/HTTP 端点。不支持 gRPC。 |
+
+追踪从不阻塞或改变 go 自身的构建，即使所有追踪组件都失效（例如未来的 go 版本让解析失效）也是如此。追踪命令的误用（错误的 flag、未知的子命令）会以非零状态退出。遇到运行时错误（`TRACEPARENT` 格式错误、目录不可写、收集器不可达）时，追踪命令在 stderr 打印警告并以 0 退出，`begin` 和 `end` 会原样打印 `TRACEPARENT`。`begin` 若发现同一 `GOCACHED_TRACE_KEY` 的崩溃运行留下的自身 span 仍处于打开状态，会给出警告并重新开始该 span。参见 `docs/adr/0007-trace-context-in-traceparent-spans-in-a-spool.md`。
 
 ## 缓存条目类型
 
