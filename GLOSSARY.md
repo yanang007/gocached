@@ -45,3 +45,12 @@ The directory that holds the local backend, used by both client and server. It i
 
 **Shared mode**:
 Running with the host GOCACHE as the cache dir, so that `go` and gocached read and write the same cache. In this mode the dir must already have been initialized by `go`.
+
+**Tool span**:
+One run of a tool by `go` through `-toolexec`, such as compiling one package, recorded with its tool name, package, action ID, duration and exit code.
+
+**Trace session**:
+The spans of one trace collected on one machine, from the first `gocached trace begin` (or `trace exec`) until they are exported. Each session has its own directory.
+
+**Spool**:
+The files in a trace session's directory, one per process, holding finished spans until they are exported.
