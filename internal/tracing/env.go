@@ -105,8 +105,8 @@ func (a *attrs) UnmarshalText(text []byte) error {
 	return nil
 }
 
-// Skip reports whether spans of type spanType (such as "tool.compile" or
-// "prog.get.hit") are dropped by GOCACHED_TRACE_SKIP.
-func (c Config) Skip(spanType string) bool {
-	return c.skip[spanType]
+// Skip reports whether spans with skip key key (such as "tool.compile" or
+// "cache.get.hit") are dropped by GOCACHED_TRACE_SKIP.
+func (c Config) Skip(key string) bool {
+	return c.skip[key]
 }

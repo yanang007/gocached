@@ -72,6 +72,13 @@
 //	GOCACHED_UPLOAD_BUFFER_BYTES  bytes queued for upload before puts block
 //	                        (default: 67108864)
 //	GOCACHED_UPLOAD_TIMEOUT       timeout of each upload batch (default: 30s)
+//	GOCACHED_TRACE          if set (non-empty) and TRACEPARENT is set, record
+//	                        a session span and a span per get, put and upload
+//	                        in the trace session (the trace environment above)
+//	                        on close, after the upload drain
+//	GOCACHED_TRACE_SKIP     comma-separated skip keys of prog spans not to
+//	                        record: cache.session, cache.get.hit,
+//	                        cache.get.miss, cache.put, cache.upload
 //
 // Environment for serve:
 //
@@ -98,6 +105,8 @@ import (
 	"os"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/yanang007/gocached/backend"
 	"github.com/yanang007/gocached/backend/breaker"
 	"github.com/yanang007/gocached/backend/gocache"
@@ -108,6 +117,8 @@ import (
 	"github.com/yanang007/gocached/internal/toolexec"
 	"github.com/yanang007/gocached/internal/tooltrace"
 	"github.com/yanang007/gocached/internal/tracecmd"
+	"github.com/yanang007/gocached/internal/tracectx"
+	"github.com/yanang007/gocached/internal/tracing"
 	"github.com/yanang007/gocached/internal/wire"
 )
 
@@ -177,14 +188,37 @@ func runProg() error {
 		client := &http.Client{Transport: wire.NodeTagTransport(string(cfg.NodeTag), wire.BearerTransport(cfg.Token, nil))}
 		rest = append(rest, breaker.New(remote.New(cfg.URL, client), breakerMaxFailures, time.Duration(cfg.RemoteTimeout)))
 	}
-	return prog.Run(context.Background(), os.Stdin, os.Stdout, os.Stderr, prog.Options{
+	opts := prog.Options{
 		Chain:         chain.New(cache, rest...),
 		Quiet:         bool(cfg.Quiet),
 		Skip:          cfg.SkipKinds,
 		DrainTimeout:  time.Duration(cfg.DrainTimeout),
 		Upload:        cfg.upload(),
 		UploadTimeout: time.Duration(cfg.UploadTimeout),
-	})
+	}
+	if tracingOn() {
+		opts.Trace, opts.TraceParent = progTrace()
+	}
+	return prog.Run(context.Background(), os.Stdin, os.Stdout, os.Stderr, opts)
+}
+
+// progTrace reads the tracing environment for prog spans. Tracing fails
+// open: a bad setting is a warning, and without a valid TRACEPARENT the
+// returned parent is invalid, so nothing is recorded.
+func progTrace() (tracing.Config, trace.SpanContext) {
+	parent, err := tracectx.FromEnv()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gocached trace: warning:", err)
+		return tracing.Config{}, trace.SpanContext{}
+	}
+	if !parent.IsValid() {
+		return tracing.Config{}, parent
+	}
+	cfg, err := tracing.ConfigFromEnviron(os.Environ(), os.Stderr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gocached trace: warning:", err)
+	}
+	return cfg, parent
 }
 
 func runServe() error {

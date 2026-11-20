@@ -13,11 +13,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/yanang007/gocached/backend"
 	"github.com/yanang007/gocached/chain"
 	"github.com/yanang007/gocached/internal/bundler"
 	"github.com/yanang007/gocached/internal/cacheprog"
 	"github.com/yanang007/gocached/internal/kind"
+	"github.com/yanang007/gocached/internal/tracing"
 )
 
 // Options configures a prog session.
@@ -41,6 +44,13 @@ type Options struct {
 	// UploadTimeout bounds each batch upload. Zero means
 	// DefaultUploadTimeout.
 	UploadTimeout time.Duration
+
+	// Trace and TraceParent turn on prog spans (ADR 0007): with a valid
+	// TraceParent (TRACEPARENT), a session span is its child and every get
+	// and put is a child span, spooled through Trace on close after the
+	// upload drain. An invalid TraceParent records nothing.
+	Trace       tracing.Config
+	TraceParent trace.SpanContext
 }
 
 // Upload defaults: puts are uploaded in the background, batched so that a
@@ -102,7 +112,7 @@ func Run(ctx context.Context, in io.Reader, out, errOut io.Writer, opts Options)
 	if opts.UploadTimeout <= 0 {
 		opts.UploadTimeout = DefaultUploadTimeout
 	}
-	s := &session{opts: opts, errOut: errOut}
+	s := &session{opts: opts, errOut: errOut, tr: newTracer(opts.Trace, opts.TraceParent)}
 	s.uploads = bundler.New(withDefaults(opts.Upload), func(st chain.Stored) int64 { return st.Object.Size }, s.uploadBatch)
 	defer func() {
 		// Stops uploads left over when Serve failed; a no-op after drain.
@@ -114,6 +124,7 @@ func Run(ctx context.Context, in io.Reader, out, errOut io.Writer, opts Options)
 	if err == nil && !s.closed {
 		// EOF without close: still give pending uploads their chance.
 		s.drain()
+		s.tr.flush(errOut)
 	}
 	return err
 }
@@ -125,6 +136,7 @@ type session struct {
 	closed bool // Close ran; set and read on Serve's goroutine only
 
 	errOut  io.Writer
+	tr      *tracer // nil when not tracing
 	uploads *bundler.Bundler[chain.Stored]
 
 	// upMu guards the upload bookkeeping, so that uploads finishing after
@@ -141,6 +153,7 @@ type session struct {
 
 func (s *session) Get(ctx context.Context, actionID []byte) (cacheprog.Entry, error) {
 	s.stats.get.Add(1)
+	start := s.tr.now()
 	ids := [][]byte{actionID}
 	hit := s.opts.Chain.Get(ctx, ids)
 	// Any backend failure degrades to a miss; go will compile and put. A
@@ -149,33 +162,52 @@ func (s *session) Get(ctx context.Context, actionID []byte) (cacheprog.Entry, er
 	f := s.opts.Chain.Fill(ctx, ids, hit)[0]
 	if f.Path == "" {
 		s.stats.miss.Add(1)
+		s.tr.record(spanGetMiss, start, actionID, tracing.Status{}, tracing.Attr{Key: cacheResultAttr, Value: "miss"})
 		return cacheprog.Entry{}, cacheprog.ErrMiss
 	}
 	h := hit[0]
+	from := "local"
 	if h.Index == 0 {
 		s.stats.hitLocal.Add(1)
 	} else {
 		s.stats.hitRemote.Add(1)
+		from = "remote"
+	}
+	if s.tr != nil {
+		s.tr.record(spanGetHit, start, actionID, tracing.Status{}, tracing.Attr{Key: cacheResultAttr, Value: "hit"},
+			tracing.Attr{Key: backendAttr, Value: from}, sizeAttr(h.Object.Size))
 	}
 	return cacheprog.Entry{OutputID: h.Object.OutputID, Size: h.Object.Size, Time: h.Object.Time, DiskPath: f.Path}, nil
 }
 
 func (s *session) Put(ctx context.Context, actionID, outputID []byte, size int64, body io.Reader) (string, error) {
 	s.stats.put.Add(1)
+	start := s.tr.now()
 	obj := backend.Object{OutputID: outputID, Size: size}
 	head := kind.NewHead(size)
 	path, err := s.opts.Chain.PutLocal(ctx, actionID, obj, io.TeeReader(body, head))
 	if err != nil {
+		if s.tr != nil {
+			s.tr.record(spanPut, start, actionID, tracing.Status{Code: tracing.StatusError, Message: err.Error()}, sizeAttr(size))
+		}
 		return "", err
 	}
 	obj.Kind = head.Kind()
 	i := obj.Kind.Index()
-	if s.opts.Chain.Len() > 1 && s.skips(obj.Kind) {
+	result := "queued"
+	switch {
+	case s.opts.Chain.Len() < 2:
+		result = "local_only"
+	case s.skips(obj.Kind):
 		s.stats.skip.Add(1)
 		s.stats.kindSkip[i].Add(1)
-		return path, nil
+		result = "skipped"
+	default:
+		s.upload(ctx, chain.Stored{ActionID: actionID, Object: obj, Path: path})
 	}
-	s.upload(ctx, chain.Stored{ActionID: actionID, Object: obj, Path: path})
+	if s.tr != nil {
+		s.tr.record(spanPut, start, actionID, tracing.Status{}, kindAttr(obj.Kind), sizeAttr(size), uploadAttr(result))
+	}
 	return path, nil
 }
 
@@ -195,6 +227,7 @@ func (s *session) skips(k kind.Kind) bool {
 func (s *session) Close(context.Context) error {
 	s.closed = true
 	s.printStats(s.errOut, s.drain())
+	s.tr.flush(s.errOut)
 	return nil
 }
 
@@ -230,8 +263,10 @@ func (s *session) uploadBatch(ctx context.Context, batch []chain.Stored) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, s.opts.UploadTimeout)
 	defer cancel()
+	start := s.tr.now()
 	for i, err := range s.opts.Chain.Upload(ctx, send) {
 		s.finishUpload(send[i].ActionID, send[i].Object.Kind, err)
+		s.tr.recordUpload(start, send[i], len(send), err)
 	}
 }
 

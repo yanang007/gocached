@@ -295,6 +295,19 @@ A span is named `<tool> <package>`, such as `compile example.com/p`, or just `<t
 
 A tracing failure never fails the tool and never reaches its stderr: go caches a compile's or link's output and replays it on every cache hit. Warnings are appended to `warnings.log` in the trace session directory (up to 64 KiB, then one "further warnings dropped" line), and `trace export` prints them on its own stderr and removes the file. Without a session directory they are dropped. Only a tool that cannot be started is reported on stderr, and that build fails anyway.
 
+### GOCACHEPROG spans
+
+With `GOCACHED_TRACE` set (any non-empty value) and a `TRACEPARENT` in the environment, `gocached prog` records a `gocacheprog` span for its lifetime, a child of `TRACEPARENT`, and under it one span per cache operation. It writes them to the trace session on close, after the upload drain. Without either variable, prog reads no trace settings and writes nothing.
+
+| Span | Skip key | Attributes |
+| ---- | -------- | ---------- |
+| `gocacheprog` | `cache.session` | none |
+| `cache get` | `cache.get.hit`, `cache.get.miss` | `gocached.cache.result` (`hit` or `miss`); on a hit also `gocached.backend` (`local` or `remote`) and `gocached.size` |
+| `cache put` | `cache.put` | `gocached.kind`, `gocached.size`, `gocached.upload` (`queued`, `skipped` by `GOCACHED_SKIP_KINDS` or an earlier refusal, or `local_only` without a server) |
+| `cache upload` | `cache.upload` | `gocached.kind`, `gocached.size`, `gocached.upload` (`uploaded`, `skipped` when the server refused the kind, `failed` with status error), `gocached.batch_size` |
+
+Every span but `gocacheprog` carries `gocached.action_id`, the 20-character form go uses as the first part of a compile's `-buildid`, so a miss and the compile that follows it share it. `GOCACHED_TRACE_SKIP` takes a comma-separated list of skip keys not to record, e.g. `GOCACHED_TRACE_SKIP=cache.get.hit,cache.upload`; by default all are recorded. go does not cache prog's stderr, so a tracing failure is a warning there: prog's answers to go and its stats line do not change.
+
 ## Entry kinds
 
 gocached recognizes what each uploaded object is from its first bytes:

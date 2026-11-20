@@ -295,6 +295,19 @@ span 名为 `<tool> <package>`，例如 `compile example.com/p`；go 没有给�
 
 追踪失败绝不会让工具失败，也绝不会写入工具的 stderr：go 会缓存 compile 和 link 的输出，并在每次命中缓存时重放。警告会追加到 trace 会话目录中的 `warnings.log`（最多 64 KiB，之后追加一行 "further warnings dropped"），`trace export` 会在自己的 stderr 上打印它们并删除该文件。没有会话目录时警告被丢弃。只有无法启动的工具才会报告在 stderr 上，而这种情况下构建本来就会失败。
 
+### GOCACHEPROG span
+
+设置了 `GOCACHED_TRACE`（任意非空值）且环境中有 `TRACEPARENT` 时，`gocached prog` 会记录一个覆盖其整个生命周期的 `gocacheprog` span（`TRACEPARENT` 的子 span），并在其下为每次缓存操作记录一个 span。这些 span 在 close 时、上传排空之后写入追踪会话。缺少任一变量时，prog 不读取任何追踪设置，也不写入任何内容。
+
+| Span | 跳过键 | 属性 |
+| ---- | ------ | ---- |
+| `gocacheprog` | `cache.session` | 无 |
+| `cache get` | `cache.get.hit`、`cache.get.miss` | `gocached.cache.result`（`hit` 或 `miss`）；命中时还有 `gocached.backend`（`local` 或 `remote`）和 `gocached.size` |
+| `cache put` | `cache.put` | `gocached.kind`、`gocached.size`、`gocached.upload`（`queued`；因 `GOCACHED_SKIP_KINDS` 或此前被拒而 `skipped`；没有服务端时为 `local_only`） |
+| `cache upload` | `cache.upload` | `gocached.kind`、`gocached.size`、`gocached.upload`（`uploaded`；服务端拒绝该类型时为 `skipped`；`failed` 并带 error 状态）、`gocached.batch_size` |
+
+除 `gocacheprog` 外，每个 span 都带有 `gocached.action_id`，即 go 用作 compile `-buildid` 第一段的 20 字符形式，因此一次未命中与随后的 compile 拥有相同的值。`GOCACHED_TRACE_SKIP` 接受逗号分隔的跳过键列表，列出的不记录，例如 `GOCACHED_TRACE_SKIP=cache.get.hit,cache.upload`；默认全部记录。go 不会缓存 prog 的 stderr，因此追踪失败只会在那里打印警告：prog 对 go 的应答和统计行都不会改变。
+
 ## 缓存条目类型
 
 gocached 根据上传对象的开头字节识别它是什么：

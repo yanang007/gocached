@@ -8,11 +8,11 @@ import (
 )
 
 func TestTraceSkipListDropsNamedSpanTypes(t *testing.T) {
-	c, err := tracing.ConfigFromEnviron([]string{"GOCACHED_TRACE_SKIP= tool.vet ,prog.get.hit,"}, io.Discard)
+	c, err := tracing.ConfigFromEnviron([]string{"GOCACHED_TRACE_SKIP= tool.vet ,cache.get.hit,"}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for typ, want := range map[string]bool{"tool.vet": true, "prog.get.hit": true, "tool.compile": false, "": false} {
+	for typ, want := range map[string]bool{"tool.vet": true, "cache.get.hit": true, "tool.compile": false, "": false} {
 		if got := c.Skip(typ); got != want {
 			t.Errorf("Skip(%q) = %v, want %v", typ, got, want)
 		}
