@@ -113,6 +113,8 @@ GOCACHE=/path/to/cache go build std
 
 After that, set `GOCACHED_DIR=/path/to/cache` and `GOCACHED_SHARE=1`.
 
+When `gocached prog` runs as go's `GOCACHEPROG`, a fresh directory needs no such step: go creates its `GOCACHE` and writes the `README` (in `initDefaultCache`, `cmd/go/internal/cache/default.go`) before it starts `GOCACHEPROG`. gocached itself never writes the `README`.
+
 `GOCACHE=off` is an error in shared mode.
 
 | Variable         | Default                    | Meaning |
@@ -231,7 +233,7 @@ When neither pull nor push is enabled, no metrics are collected.
 
 ## Toolexec wrapper
 
-`gocached toolexec` is a [`-toolexec`](https://pkg.go.dev/cmd/go#hdr-Build_flags) wrapper that build tracing builds on. It runs every tool go starts (compile, link, ...) with the same arguments, environment, input, output and exit code, and forwards each tool's `-V=full` version line unchanged, so builds with and without it compute the same action IDs and share one cache. gocached never sets `GOFLAGS` for you:
+`gocached toolexec` is a [`-toolexec`](https://pkg.go.dev/cmd/go#hdr-Build_flags) wrapper that build tracing builds on. It runs every tool go starts (compile, link, ...) with the same arguments, environment, input, output and exit code, and forwards each tool's `-V=full` version line unchanged, so builds with and without it compute the same action IDs and share one cache. gocached never sets `GOFLAGS` for you, except in `gocached trace go` (see [Build tracing](#build-tracing)):
 
 ```sh
 export GOFLAGS="'-toolexec=gocached toolexec'"
@@ -258,12 +260,19 @@ export TRACEPARENT=$(gocached trace end)                    # back to "build"
 export TRACEPARENT=$(gocached trace end --export)           # back to the CI's span, or empty
 ```
 
+For a first trace of a build, `gocached trace go` sets everything up:
+
+```sh
+gocached trace go -n build -- build ./...    # writes gocached-trace.jsonl
+```
+
 | Command | What it does |
 | ------- | ------------ |
 | `trace begin [-n name] [-s service] [-k kind] [-a k=v]... [--key K] [--start T] [--no-record]` | Opens a child of the current span (a new root without one) and prints its traceparent. `-k` sets the span kind: `internal` (default), `server`, `client`, `producer` or `consumer`. `--key K` replaces `GOCACHED_TRACE_KEY` for this begin only (span ID, trace ID without a parent, and session directory come from K). `--start T` sets the start time, RFC 3339 or Unix seconds. `--no-record` only prints the traceparent and writes nothing. |
 | `trace end [-a k=v]... [--exit-code N] [--status ok|error] [-m message] [--export]` | Closes the current span and prints its parent's traceparent, empty at the root. `--exit-code N` sets attribute `process.exit.code` and, when N is not 0, status error, as `trace exec` does; `--status` sets the status directly (overriding `--exit-code`) and `-m` its message. `--export` also exports the session. |
 | `trace set -a k=v...` | Adds attributes to the current span, which must be open (begun by `trace begin` or `trace exec`). Each call writes its own file next to the span, so concurrent calls are safe; the attributes are merged when the span ends or is exported, later calls overriding earlier ones and `trace end -a` overriding both. Prints nothing. |
 | `trace export [--all]` | Exports the current session, or with `--all` every session under the base dir. Spans still open are closed now with status error. |
+| `trace go [-n name] [-s service] [-k kind] [-a k=v]... -- [go args...]` | `trace exec` of `go <go args>` (`-n` defaults to `go`) with build tracing preset. Each of these is set only when it is absent from the environment (set but empty counts as set): `GOCACHED_TRACE=1`, `GOCACHEPROG=<gocached> prog`, `GOCACHED_SHARE=1` (not when `GOCACHED_DIR` is set), `GOCACHED_TRACE_RUSAGE=1`. `-toolexec=<gocached> toolexec` is appended to `GOFLAGS` unless it already has a `-toolexec`. `<gocached>` is the running binary, quoted when its path has spaces. With `GOCACHE=off` (from `go env GOCACHE`) nothing cache-related is set, and a note says so. Without an exporter (`OTEL_EXPORTER_OTLP_[TRACES_]ENDPOINT` or `GOCACHED_TRACE_FILE`) it exports to `gocached-trace.jsonl` in the current directory and says so on stderr. This is the only command that sets `GOFLAGS` or turns on shared mode; running it is the opt-in. |
 | `trace exec [-n name] [-s service] [-k kind] [-a k=v]... -- cmd [args...]` | Runs `cmd` in a child of the current span (`-n` defaults to `cmd`, `-k` as for `begin`) with `TRACEPARENT` set to it, then closes the span with attribute `process.exit.code`, status error if it is not 0. Exports the session when the span is the outermost one, so nested `trace exec` calls and `trace exec` inside `begin`/`end` export once, at the top. Exits with `cmd`'s exit code (127 if it cannot start, 128+n if signal n kills it); interrupt and terminate signals are forwarded to `cmd`, and the span is still closed and exported. |
 
 A pipeline of several jobs becomes one trace when every job derives the pipeline span from the same key, such as the pipeline ID. Each job keeps its own `GOCACHED_TRACE_KEY` (e.g. the job ID), so its spans are children of the pipeline span with their own span IDs:

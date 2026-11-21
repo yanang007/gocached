@@ -1,4 +1,4 @@
-// Package tracecmd implements `gocached trace begin|end|set|export|exec` (ADR
+// Package tracecmd implements `gocached trace begin|end|set|export|exec|go` (ADR
 // 0007). Usage errors (bad flags, unknown command) exit 2. Otherwise every
 // command fails open: it warns on stderr and exits 0 on its own errors
 // (exec exits with its command's code), and begin and end print the
@@ -11,9 +11,9 @@ import (
 	"fmt"
 	"io"
 	"strconv"
-	"strings"
 	"time"
 
+	"github.com/yanang007/gocached/internal/envx"
 	"github.com/yanang007/gocached/internal/rusage"
 	"github.com/yanang007/gocached/internal/tracectx"
 	"github.com/yanang007/gocached/internal/tracing"
@@ -26,7 +26,7 @@ type Options struct {
 	Stdout, Stderr io.Writer
 }
 
-const usage = "usage: gocached trace begin [-n name] [-s service] [-k kind] [-a k=v]... [--key K] [--start T] [--no-record] | end [-a k=v]... [--exit-code N] [--status ok|error] [-m message] [--export] | set -a k=v... | export [--all] | exec [-n name] [-s service] [-k kind] [-a k=v]... -- cmd [args...]"
+const usage = "usage: gocached trace begin [-n name] [-s service] [-k kind] [-a k=v]... [--key K] [--start T] [--no-record] | end [-a k=v]... [--exit-code N] [--status ok|error] [-m message] [--export] | set -a k=v... | export [--all] | exec [-n name] [-s service] [-k kind] [-a k=v]... -- cmd [args...] | go [-n name] [-s service] [-k kind] [-a k=v]... -- [go args...]"
 
 // Run runs `gocached trace args...` and returns its exit code. A usage
 // error (bad flags, unknown command) is misuse and exits 2. Runtime errors
@@ -48,6 +48,8 @@ func Run(args []string, opts Options) int {
 		return export(args[1:], opts)
 	case "exec":
 		return execCmd(args[1:], opts)
+	case "go":
+		return goCmd(args[1:], opts)
 	default:
 		fmt.Fprintf(opts.Stderr, "gocached trace: unknown command %q\n%s\n", args[0], usage)
 		return 2
@@ -202,7 +204,7 @@ func parseStart(s string) (time.Time, error) {
 // traceparent. On error it returns environ's TRACEPARENT unchanged, so the
 // caller can always print the result.
 func Begin(environ []string, sf SpanFlags, bf BeginFlags, stderr io.Writer) (string, error) {
-	unchanged := lookup(environ, tracectx.TraceparentEnv)
+	unchanged := envx.Get(environ, tracectx.TraceparentEnv)
 	parent, err := tracectx.FromEnviron(environ)
 	if err != nil {
 		return unchanged, err
@@ -239,7 +241,7 @@ func End(environ []string, attrs []tracing.Attr, export bool, stderr io.Writer) 
 // was the outermost of its session. A non-nil usage adds its attributes
 // when GOCACHED_TRACE_RUSAGE is set.
 func closeSpan(cmd string, environ []string, attrs []tracing.Attr, usage *rusage.Usage, status tracing.Status, export func(outermost bool) bool, stderr io.Writer) (string, error) {
-	unchanged := lookup(environ, tracectx.TraceparentEnv)
+	unchanged := envx.Get(environ, tracectx.TraceparentEnv)
 	cur, err := tracectx.FromEnviron(environ)
 	if err != nil {
 		return unchanged, err
@@ -331,15 +333,4 @@ func newFlagSet(name string, opts Options) *flag.FlagSet {
 
 func warn(stderr io.Writer, cmd string, err error) {
 	fmt.Fprintf(stderr, "gocached trace %s: warning: %v\n", cmd, err)
-}
-
-// lookup returns the last value of key in env, as exec does.
-func lookup(env []string, key string) string {
-	v := ""
-	for _, kv := range env {
-		if k, val, ok := strings.Cut(kv, "="); ok && k == key {
-			v = val
-		}
-	}
-	return v
 }

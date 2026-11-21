@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/caarlos0/env/v11"
+
+	"github.com/yanang007/gocached/internal/envx"
 )
 
 // NodeTagAttr is the span attribute that carries GOCACHED_NODE_TAG.
@@ -42,12 +44,7 @@ type envConfig struct {
 // warn. On error the returned Config is still usable with whatever parsed,
 // so callers can fail open.
 func ConfigFromEnviron(environ []string, warn io.Writer) (Config, error) {
-	m := map[string]string{}
-	for _, kv := range environ {
-		if k, v, ok := strings.Cut(kv, "="); ok {
-			m[k] = v
-		}
-	}
+	m := envx.Map(environ)
 	var e envConfig
 	var errs []error
 	var notInt []string // int fields whose value did not parse

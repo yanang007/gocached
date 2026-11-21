@@ -6,9 +6,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"strings"
 	"time"
 
+	"github.com/yanang007/gocached/internal/envx"
 	"github.com/yanang007/gocached/internal/rusage"
 )
 
@@ -62,7 +62,7 @@ func Run(args []string, opts Options) int {
 		_, err := runTool(args, env, opts)
 		return exitCode(err, opts.Stderr)
 	}
-	ev := Parse(args, lookupEnv(env, "TOOLEXEC_IMPORTPATH"))
+	ev := Parse(args, envx.Get(env, "TOOLEXEC_IMPORTPATH"))
 	for _, h := range opts.Hooks {
 		callHook(opts.Warn, "before", func() error { return h.Before(copyEvent(ev)) })
 	}
@@ -123,15 +123,4 @@ func copyEvent(ev Event) Event {
 	ev.Args = append([]string(nil), ev.Args...)
 	ev.Outputs = append([]string(nil), ev.Outputs...)
 	return ev
-}
-
-// lookupEnv returns the last value of key in env, as exec does.
-func lookupEnv(env []string, key string) string {
-	v := ""
-	for _, kv := range env {
-		if k, val, ok := strings.Cut(kv, "="); ok && k == key {
-			v = val
-		}
-	}
-	return v
 }

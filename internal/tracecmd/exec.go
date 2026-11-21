@@ -38,7 +38,11 @@ func execCmd(args []string, opts Options) int {
 	if sf.Name == "" {
 		sf.Name = argv[0]
 	}
+	return execSpan(argv, sf, opts)
+}
 
+// execSpan runs argv in a span described by sf, as `trace exec` does.
+func execSpan(argv []string, sf SpanFlags, opts Options) int {
 	environ := opts.Environ
 	tp, beginErr := Begin(opts.Environ, sf, BeginFlags{}, opts.Stderr)
 	if beginErr != nil {

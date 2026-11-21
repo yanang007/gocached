@@ -77,6 +77,10 @@ func Resolve(o ResolveOptions) (string, error) {
 			return "", ErrGOCACHEOff
 		}
 	}
+	// go writes this README itself in initDefaultCache
+	// (cmd/go/internal/cache/default.go) before it starts GOCACHEPROG, so a
+	// fresh GOCACHE passes when gocached runs as go's GOCACHEPROG. gocached
+	// never writes it.
 	if err := CheckREADME(dir); err != nil {
 		return "", fmt.Errorf("shared mode: %s is not a GOCACHE (initialize it with a go build run with GOCACHE=%s): %w", dir, dir, err)
 	}

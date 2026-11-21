@@ -113,6 +113,8 @@ GOCACHE=/path/to/cache go build std
 
 然后设置 `GOCACHED_DIR=/path/to/cache` 和 `GOCACHED_SHARE=1`。
 
+`gocached prog` 作为 go 的 `GOCACHEPROG` 运行时，新目录不需要这一步：go 在启动 `GOCACHEPROG` 之前就会创建自己的 `GOCACHE` 并写入 `README`（见 `cmd/go/internal/cache/default.go` 中的 `initDefaultCache`）。gocached 自己从不写这个 `README`。
+
 共享模式下 `GOCACHE=off` 会报错。
 
 | 变量             | 默认值                 | 含义 |
@@ -231,7 +233,7 @@ pull 和 push 都未开启时，不收集任何指标。
 
 ## Toolexec 包装器
 
-`gocached toolexec` 是一个 [`-toolexec`](https://pkg.go.dev/cmd/go#hdr-Build_flags) 包装器，构建追踪基于它实现。它运行 go 启动的每个工具（compile、link 等），参数、环境变量、输入、输出和退出码都保持不变，并原样转发每个工具的 `-V=full` 版本行，因此用与不用它的构建算出相同的 action ID，共用同一份缓存。gocached 不会替你设置 `GOFLAGS`：
+`gocached toolexec` 是一个 [`-toolexec`](https://pkg.go.dev/cmd/go#hdr-Build_flags) 包装器，构建追踪基于它实现。它运行 go 启动的每个工具（compile、link 等），参数、环境变量、输入、输出和退出码都保持不变，并原样转发每个工具的 `-V=full` 版本行，因此用与不用它的构建算出相同的 action ID，共用同一份缓存。gocached 不会替你设置 `GOFLAGS`，`gocached trace go` 除外（见[构建追踪](#构建追踪)）：
 
 ```sh
 export GOFLAGS="'-toolexec=gocached toolexec'"
@@ -258,12 +260,19 @@ export TRACEPARENT=$(gocached trace end)                    # 回到 "build"
 export TRACEPARENT=$(gocached trace end --export)           # 回到 CI 的 span，或为空
 ```
 
+要得到一次构建的第一份追踪，`gocached trace go` 会把一切都设好：
+
+```sh
+gocached trace go -n build -- build ./...    # 写入 gocached-trace.jsonl
+```
+
 | 命令 | 作用 |
 | ---- | ---- |
 | `trace begin [-n name] [-s service] [-k kind] [-a k=v]... [--key K] [--start T] [--no-record]` | 在当前 span 下开启一个子 span（没有当前 span 时开启新的根 span），并打印它的 traceparent。`-k` 设置 span kind：`internal`（默认）、`server`、`client`、`producer` 或 `consumer`。`--key K` 仅对本次 begin 替代 `GOCACHED_TRACE_KEY`（span ID、没有父 span 时的 trace ID 以及会话目录都由 K 派生）。`--start T` 设置开始时间，格式为 RFC 3339 或 Unix 秒。`--no-record` 只打印 traceparent，不写入任何内容。 |
 | `trace end [-a k=v]... [--exit-code N] [--status ok|error] [-m message] [--export]` | 关闭当前 span，打印其父 span 的 traceparent，在根 span 处为空。`--exit-code N` 设置属性 `process.exit.code`，N 非 0 时状态为错误，与 `trace exec` 相同；`--status` 直接设置状态（覆盖 `--exit-code`），`-m` 设置状态消息。`--export` 同时导出该会话。 |
 | `trace set -a k=v...` | 给当前 span 添加属性，该 span 必须处于打开状态（由 `trace begin` 或 `trace exec` 开启）。每次调用在 span 旁写入自己的文件，因此并发调用是安全的；属性在 span 结束或被导出时合并，后面的调用覆盖前面的，`trace end -a` 覆盖两者。不打印任何内容。 |
 | `trace export [--all]` | 导出当前会话；加 `--all` 时导出基目录下的所有会话。仍未关闭的 span 在此时以错误状态关闭。 |
+| `trace go [-n name] [-s service] [-k kind] [-a k=v]... -- [go args...]` | 对 `go <go args>` 执行 `trace exec`（`-n` 默认为 `go`），并预设好构建追踪。以下变量仅在环境中完全不存在时才设置（已设置但为空也算已设置）：`GOCACHED_TRACE=1`、`GOCACHEPROG=<gocached> prog`、`GOCACHED_SHARE=1`（设置了 `GOCACHED_DIR` 时不设）、`GOCACHED_TRACE_RUSAGE=1`。除非 `GOFLAGS` 中已有 `-toolexec`，否则向其追加 `-toolexec=<gocached> toolexec`。`<gocached>` 是正在运行的二进制，路径含空格时会加引号。`GOCACHE=off`（取自 `go env GOCACHE`）时不设置任何与缓存相关的变量，并打印一条说明。没有配置导出器（`OTEL_EXPORTER_OTLP_[TRACES_]ENDPOINT` 或 `GOCACHED_TRACE_FILE`）时，导出到当前目录下的 `gocached-trace.jsonl`，并在 stderr 上说明。这是唯一会设置 `GOFLAGS` 或开启共享模式的命令；运行它即表示选择启用。 |
 | `trace exec [-n name] [-s service] [-k kind] [-a k=v]... -- cmd [args...]` | 在当前 span 的子 span 中运行 `cmd`（`-n` 默认为 `cmd`，`-k` 与 `begin` 相同），并把 `TRACEPARENT` 设为该子 span；结束后关闭 span，带属性 `process.exit.code`，退出码非 0 时状态为错误。该 span 是最外层时导出会话，因此嵌套的 `trace exec` 以及 `begin`/`end` 内部的 `trace exec` 只在最外层导出一次。以 `cmd` 的退出码退出（无法启动时为 127，被信号 n 杀死时为 128+n）；中断和终止信号会转发给 `cmd`，span 仍会关闭并导出。 |
 
 当每个任务都从同一个 key（例如流水线 ID）派生流水线 span 时，多个任务组成的流水线就成为一个 trace。每个任务保留自己的 `GOCACHED_TRACE_KEY`（例如任务 ID），因此它的 span 是流水线 span 的子 span，并有各自的 span ID：
