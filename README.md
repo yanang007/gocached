@@ -270,7 +270,7 @@ Spans of `begin` and `exec` are `internal` unless `-k` says otherwise; tool and 
 
 Finished spans are written as OTLP JSON files into a trace session directory and stay there until exported, so spans of a killed job can be exported later. Exporting empties the directory; if the exporter fails, the files are kept.
 
-Span attributes are typed in OTLP JSON. `process.exit.code`, `gocached.exit_code`, `gocached.size` (in bytes) and `gocached.batch_size` are ints (`intValue`, a decimal string as OTLP JSON writes 64-bit integers); every other attribute, including those from `-a` and `GOCACHED_TRACE_ATTRS`, is a string (`stringValue`).
+Span attributes are typed in OTLP JSON. `process.exit.code`, `gocached.exit_code`, `gocached.size` (in bytes) and `gocached.batch_size` are ints (`intValue`, a decimal string as OTLP JSON writes 64-bit integers); every other attribute, including those from `-a` and `GOCACHED_TRACE_ATTRS`, is a string (`stringValue`). With `GOCACHED_TRACE_RUSAGE`, `gocached.cpu.user` and `gocached.cpu.system` are doubles (`doubleValue`) and `gocached.memory.peak` is an int.
 
 | Variable | Meaning |
 | -------- | ------- |
@@ -280,6 +280,7 @@ Span attributes are typed in OTLP JSON. `process.exit.code`, `gocached.exit_code
 | `GOCACHED_TRACE_KEY` | Any string, such as a job ID. The outermost span's ID, and without an incoming `TRACEPARENT` the trace ID, are derived from it, so a rerun of the same job finds its span. It also names the session directory. Inner span IDs are random. |
 | `GOCACHED_TRACE_SESSION_DIR` | Session directory used as is (with a warning if it is not empty). |
 | `GOCACHED_TRACE_BASE_DIR` | Parent of the session directories (default `<tmp>/gocached-trace`), each named after the hash of `GOCACHED_TRACE_KEY` or after the trace ID. |
+| `GOCACHED_TRACE_RUSAGE` | Any non-empty value adds the resource usage of the child process to [toolexec spans](#toolexec-spans) and `trace exec` spans: `gocached.cpu.user` and `gocached.cpu.system` (CPU seconds, doubles) and `gocached.memory.peak` (peak resident memory in bytes, an int: `Maxrss` on Linux and macOS, the peak working set on Windows; left out when unknown). Off by default. |
 | `GOCACHED_TRACE_FILE` | Export by appending one OTLP JSON document per export to this file. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `..._HEADERS`, `..._TIMEOUT` | Export to an OTLP/HTTP endpoint as JSON. gRPC is not supported. |
 

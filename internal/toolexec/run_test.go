@@ -157,3 +157,12 @@ func TestMissingToolIsReportedOnStderr(t *testing.T) {
 		t.Fatalf("after hook should see the start error, got %+v", h.results)
 	}
 }
+
+func TestTracedRunReportsTheToolsResourceUsage(t *testing.T) {
+	h := &recordingHook{}
+	runFakeTool(t, nil, 0, toolexec.Options{Trace: true, Hooks: []toolexec.Hook{h}})
+	u := h.results[0].Usage
+	if u.PeakMemory <= 0 || u.User < 0 || u.System < 0 {
+		t.Fatalf("usage %+v, want non-zero peak memory and non-negative CPU times", u)
+	}
+}

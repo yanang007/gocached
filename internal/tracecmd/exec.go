@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/yanang007/gocached/internal/rusage"
 	"github.com/yanang007/gocached/internal/tracectx"
 	"github.com/yanang007/gocached/internal/tracing"
 )
@@ -46,7 +47,7 @@ func execCmd(args []string, opts Options) int {
 		environ = append(append([]string(nil), opts.Environ...), tracectx.TraceparentEnv+"="+tp)
 	}
 
-	code, runErr := run(argv, environ, opts)
+	code, usage, runErr := run(argv, environ, opts)
 	if runErr != nil {
 		fmt.Fprintf(opts.Stderr, "gocached trace exec: %v\n", runErr)
 	}
@@ -56,7 +57,7 @@ func execCmd(args []string, opts Options) int {
 
 	attrs := []tracing.Attr{{Key: tracing.ExitCodeAttr, Value: tracing.Int(int64(code))}}
 	status := tracing.ExitStatus(code, runErr)
-	_, err := closeSpan("exec", environ, attrs, status, func(outermost bool) bool { return outermost }, opts.Stderr)
+	_, err := closeSpan("exec", environ, attrs, &usage, status, func(outermost bool) bool { return outermost }, opts.Stderr)
 	if err != nil {
 		warn(opts.Stderr, "exec", err)
 	}
@@ -64,9 +65,9 @@ func execCmd(args []string, opts Options) int {
 }
 
 // run runs argv with environ and the given stdio, forwarding interrupt and
-// terminate signals to it, and returns its exit code. The error, if any,
-// says why the command did not exit normally.
-func run(argv, environ []string, opts Options) (int, error) {
+// terminate signals to it, and returns its exit code and resource usage.
+// The error, if any, says why the command did not exit normally.
+func run(argv, environ []string, opts Options) (int, rusage.Usage, error) {
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Env = environ
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = opts.Stdin, opts.Stdout, opts.Stderr
@@ -77,31 +78,32 @@ func run(argv, environ []string, opts Options) (int, error) {
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sigs)
 
-	if err := cmd.Start(); err != nil {
-		return exitCannotRun, err
-	}
 	done := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case s := <-sigs:
-				// On Windows a console Ctrl+C already reaches the child, and
-				// Signal(os.Interrupt) is unsupported; the error is ignored.
-				_ = cmd.Process.Signal(s)
-			case <-done:
-				return
+	usage, err := rusage.Run(cmd, func() {
+		go func() {
+			for {
+				select {
+				case s := <-sigs:
+					// On Windows a console Ctrl+C already reaches the child, and
+					// Signal(os.Interrupt) is unsupported; the error is ignored.
+					_ = cmd.Process.Signal(s)
+				case <-done:
+					return
+				}
 			}
-		}
-	}()
-	err := cmd.Wait()
+		}()
+	})
 	close(done)
+	if cmd.ProcessState == nil {
+		return exitCannotRun, usage, err // it did not start
+	}
 
 	var exitErr *exec.ExitError
 	if err != nil && !errors.As(err, &exitErr) {
-		return exitCannotRun, err
+		return exitCannotRun, usage, err
 	}
 	if ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
-		return exitSignal + int(ws.Signal()), fmt.Errorf("killed by %v", ws.Signal())
+		return exitSignal + int(ws.Signal()), usage, fmt.Errorf("killed by %v", ws.Signal())
 	}
-	return cmd.ProcessState.ExitCode(), nil
+	return cmd.ProcessState.ExitCode(), usage, nil
 }

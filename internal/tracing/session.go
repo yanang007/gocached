@@ -39,6 +39,9 @@ type Config struct {
 	// Warn receives warnings that do not stop the operation, such as a
 	// non-empty GOCACHED_TRACE_SESSION_DIR. Nil discards them.
 	Warn io.Writer
+	// Rusage (GOCACHED_TRACE_RUSAGE) adds the CPU time and peak memory of
+	// the child process to tool and `trace exec` spans, see UsageAttrs.
+	Rusage bool
 
 	skip map[string]bool // span types from GOCACHED_TRACE_SKIP, see Skip
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -118,7 +119,7 @@ func TestFailuresWarnExitZeroAndKeepTraceparent(t *testing.T) {
 type exportedSpan struct {
 	Service, Name, SpanID, ParentSpanID string
 	Attrs                               map[string]string
-	Types                               map[string]string // OTLP value field per attribute: "string" or "int"
+	Types                               map[string]string // OTLP value field per attribute: "string", "int" or "double"
 	StatusCode                          int
 	StatusMessage                       string
 	Kind                                int
@@ -148,7 +149,10 @@ func exported(t *testing.T, path string) []exportedSpan {
 						Kind         int
 						Attributes   []struct {
 							Key   string
-							Value struct{ StringValue, IntValue *string }
+							Value struct {
+								StringValue, IntValue *string
+								DoubleValue           *float64
+							}
 						}
 						Status struct {
 							Code    int
@@ -176,6 +180,8 @@ func exported(t *testing.T, path string) []exportedSpan {
 						switch {
 						case a.Value.IntValue != nil:
 							e.Attrs[a.Key], e.Types[a.Key] = *a.Value.IntValue, "int"
+						case a.Value.DoubleValue != nil:
+							e.Attrs[a.Key], e.Types[a.Key] = strconv.FormatFloat(*a.Value.DoubleValue, 'g', -1, 64), "double"
 						case a.Value.StringValue != nil:
 							e.Attrs[a.Key], e.Types[a.Key] = *a.Value.StringValue, "string"
 						}

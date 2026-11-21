@@ -19,6 +19,8 @@
 //	OTEL_EXPORTER_OTLP_*    export to an OTLP/HTTP endpoint
 //	OTEL_SERVICE_NAME, GOCACHED_TRACE_ATTRS, GOCACHED_NODE_TAG  defaults
 //	                        for new spans
+//	GOCACHED_TRACE_RUSAGE   if set, exec and tool spans carry the child's CPU
+//	                        time and peak memory
 //
 // Environment for toolexec:
 //

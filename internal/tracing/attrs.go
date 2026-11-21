@@ -2,6 +2,8 @@ package tracing
 
 import (
 	"strconv"
+
+	"github.com/yanang007/gocached/internal/rusage"
 )
 
 // Span attribute keys shared by the processes that write spans.
@@ -18,6 +20,12 @@ const (
 	PackageAttr      = "gocached.package"
 	OutputAttr       = "gocached.output"
 	ToolExitCodeAttr = "gocached.exit_code"
+
+	// Resource usage of a child process, with GOCACHED_TRACE_RUSAGE: CPU
+	// time in seconds (double) and peak memory in bytes (int).
+	CPUUserAttr    = "gocached.cpu.user"
+	CPUSystemAttr  = "gocached.cpu.system"
+	MemoryPeakAttr = "gocached.memory.peak"
 )
 
 // ExitStatus is the status of a span around a process that ended with exit
@@ -31,4 +39,17 @@ func ExitStatus(code int, err error) Status {
 		return Status{Code: StatusError, Message: "exit status " + strconv.Itoa(code)}
 	}
 	return Status{}
+}
+
+// UsageAttrs are the resource usage attributes of a child process: CPU
+// user and system seconds, and peak memory when it is known.
+func UsageAttrs(u rusage.Usage) []Attr {
+	attrs := []Attr{
+		{Key: CPUUserAttr, Value: Double(u.User.Seconds())},
+		{Key: CPUSystemAttr, Value: Double(u.System.Seconds())},
+	}
+	if u.PeakMemory > 0 {
+		attrs = append(attrs, Attr{Key: MemoryPeakAttr, Value: Int(u.PeakMemory)})
+	}
+	return attrs
 }

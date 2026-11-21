@@ -270,7 +270,7 @@ export TRACEPARENT=$(gocached trace end --export)           # 回到 CI 的 span
 
 已结束的 span 以 OTLP JSON 文件写入追踪会话目录，在导出前一直保留，所以被杀掉的任务的 span 也能事后导出。导出会清空该目录；导出器失败时文件保留。
 
-span 属性在 OTLP JSON 中带有类型。`process.exit.code`、`gocached.exit_code`、`gocached.size`（单位为字节）和 `gocached.batch_size` 是整数（`intValue`，按 OTLP JSON 对 64 位整数的写法为十进制字符串）；其余所有属性，包括来自 `-a` 和 `GOCACHED_TRACE_ATTRS` 的属性，都是字符串（`stringValue`）。
+span 属性在 OTLP JSON 中带有类型。`process.exit.code`、`gocached.exit_code`、`gocached.size`（单位为字节）和 `gocached.batch_size` 是整数（`intValue`，按 OTLP JSON 对 64 位整数的写法为十进制字符串）；其余所有属性，包括来自 `-a` 和 `GOCACHED_TRACE_ATTRS` 的属性，都是字符串（`stringValue`）。设置 `GOCACHED_TRACE_RUSAGE` 时，`gocached.cpu.user` 和 `gocached.cpu.system` 是浮点数（`doubleValue`），`gocached.memory.peak` 是整数。
 
 | 变量 | 含义 |
 | ---- | ---- |
@@ -280,6 +280,7 @@ span 属性在 OTLP JSON 中带有类型。`process.exit.code`、`gocached.exit_
 | `GOCACHED_TRACE_KEY` | 任意字符串，例如任务 ID。最外层 span 的 ID（以及没有传入 `TRACEPARENT` 时的 trace ID）由它派生，因此同一任务重跑时能找到自己的 span；它也决定会话目录名。内层 span 的 ID 是随机的。 |
 | `GOCACHED_TRACE_SESSION_DIR` | 原样使用的会话目录（非空时给出警告）。 |
 | `GOCACHED_TRACE_BASE_DIR` | 会话目录的上级目录（默认 `<tmp>/gocached-trace`），每个会话目录以 `GOCACHED_TRACE_KEY` 的哈希或 trace ID 命名。 |
+| `GOCACHED_TRACE_RUSAGE` | 任意非空值会把子进程的资源用量加到 [toolexec span](#toolexec-span) 和 `trace exec` 的 span 上：`gocached.cpu.user` 和 `gocached.cpu.system`（CPU 秒数，浮点数）以及 `gocached.memory.peak`（峰值常驻内存字节数，整数：Linux 和 macOS 上取自 `Maxrss`，Windows 上为峰值工作集；无法获取时省略）。默认关闭。 |
 | `GOCACHED_TRACE_FILE` | 导出到此文件，每次导出追加一个 OTLP JSON 文档。 |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`、`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`、`..._HEADERS`、`..._TIMEOUT` | 以 JSON 导出到 OTLP/HTTP 端点。不支持 gRPC。 |
 

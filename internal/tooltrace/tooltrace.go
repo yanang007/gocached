@@ -84,6 +84,9 @@ func (h spanHook) After(ev toolexec.Event, res toolexec.Result) error {
 	add(tracing.ActionIDAttr, ev.ActionID)
 	add(tracing.OutputAttr, strings.Join(ev.Outputs, " "))
 	attrs = append(attrs, tracing.Attr{Key: tracing.ToolExitCodeAttr, Value: tracing.Int(int64(res.ExitCode))})
+	if cfg.Rusage {
+		attrs = append(attrs, tracing.UsageAttrs(res.Usage)...)
+	}
 	s.Attrs = tracing.MergeAttrs(s.Attrs, attrs...)
 	s.Status = tracing.ExitStatus(res.ExitCode, res.Err)
 	return cfg.Record(s)

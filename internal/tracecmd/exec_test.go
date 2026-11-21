@@ -145,3 +145,33 @@ func TestNestedExecChainsSpansAndOnlyTheOutermostExports(t *testing.T) {
 		t.Errorf("%d exports, want 1 (the inner exec must not export)", n)
 	}
 }
+
+func TestExecAddsResourceUsageOnlyWithTraceRusage(t *testing.T) {
+	keys := []string{"gocached.cpu.user", "gocached.cpu.system", "gocached.memory.peak"}
+	for _, on := range []bool{false, true} {
+		file := filepath.Join(t.TempDir(), "trace.jsonl")
+		sh := newShell(t, "GOCACHED_TRACE_FILE="+file)
+		if on {
+			sh.env["GOCACHED_TRACE_RUSAGE"] = "1"
+		}
+		if code, _ := sh.exec([]string{childEnv + "=exit:0"}, "-n", "build", "--", self(t)); code != 0 {
+			t.Fatalf("exit code %d", code)
+		}
+		b := spansByName(t, file, 1)["build"]
+		for _, k := range keys {
+			if _, ok := b.Attrs[k]; ok != on {
+				t.Errorf("GOCACHED_TRACE_RUSAGE set %v: %s present %v (attrs %v)", on, k, ok, b.Attrs)
+			}
+		}
+		if !on {
+			continue
+		}
+		if b.Types["gocached.cpu.user"] != "double" || b.Types["gocached.cpu.system"] != "double" || b.Types["gocached.memory.peak"] != "int" {
+			t.Errorf("types %v, want double CPU times and int peak memory", b.Types)
+		}
+		// The child is a Go test binary: its peak memory is at least 1 MiB.
+		if peak, _ := strconv.ParseInt(b.Attrs["gocached.memory.peak"], 10, 64); peak < 1<<20 {
+			t.Errorf("gocached.memory.peak = %q, want at least 1 MiB", b.Attrs["gocached.memory.peak"])
+		}
+	}
+}

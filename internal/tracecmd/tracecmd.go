@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/yanang007/gocached/internal/rusage"
 	"github.com/yanang007/gocached/internal/tracectx"
 	"github.com/yanang007/gocached/internal/tracing"
 )
@@ -126,7 +127,7 @@ func end(args []string, opts Options) int {
 		fmt.Fprintf(opts.Stderr, "gocached trace end: %v\n%s\n", err, usage)
 		return 2
 	}
-	tp, err := closeSpan("end", opts.Environ, attrs, status, func(bool) bool { return *export }, opts.Stderr)
+	tp, err := closeSpan("end", opts.Environ, attrs, nil, status, func(bool) bool { return *export }, opts.Stderr)
 	fmt.Fprintln(opts.Stdout, tp)
 	if err != nil {
 		warn(opts.Stderr, "end", err)
@@ -189,12 +190,13 @@ func Begin(environ []string, sf SpanFlags, stderr io.Writer) (string, error) {
 // together with the parent's traceparent. On a failure to close, End
 // returns environ's TRACEPARENT unchanged.
 func End(environ []string, attrs []tracing.Attr, export bool, stderr io.Writer) (string, error) {
-	return closeSpan("end", environ, attrs, tracing.Status{}, func(bool) bool { return export }, stderr)
+	return closeSpan("end", environ, attrs, nil, tracing.Status{}, func(bool) bool { return export }, stderr)
 }
 
 // closeSpan is End with a status, and export decided from whether the span
-// was the outermost of its session.
-func closeSpan(cmd string, environ []string, attrs []tracing.Attr, status tracing.Status, export func(outermost bool) bool, stderr io.Writer) (string, error) {
+// was the outermost of its session. A non-nil usage adds its attributes
+// when GOCACHED_TRACE_RUSAGE is set.
+func closeSpan(cmd string, environ []string, attrs []tracing.Attr, usage *rusage.Usage, status tracing.Status, export func(outermost bool) bool, stderr io.Writer) (string, error) {
 	unchanged := lookup(environ, tracectx.TraceparentEnv)
 	cur, err := tracectx.FromEnviron(environ)
 	if err != nil {
@@ -203,6 +205,9 @@ func closeSpan(cmd string, environ []string, attrs []tracing.Attr, status tracin
 	cfg, cfgErr := tracing.ConfigFromEnviron(environ, stderr)
 	if cfgErr != nil {
 		warn(stderr, cmd, cfgErr)
+	}
+	if usage != nil && cfg.Rusage {
+		attrs = append(attrs, tracing.UsageAttrs(*usage)...)
 	}
 	parent, outermost, err := cfg.EndStatus(cur, attrs, status)
 	if err != nil {

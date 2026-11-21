@@ -23,6 +23,7 @@ type envConfig struct {
 	NodeTag    string `env:"GOCACHED_NODE_TAG"`
 	File       string `env:"GOCACHED_TRACE_FILE"`
 	Skip       string `env:"GOCACHED_TRACE_SKIP"`
+	Rusage     string `env:"GOCACHED_TRACE_RUSAGE"`
 }
 
 // ConfigFromEnviron builds a Config from environ (KEY=value pairs, as
@@ -30,7 +31,8 @@ type envConfig struct {
 // _KEY; service from OTEL_SERVICE_NAME; attributes from GOCACHED_TRACE_ATTRS
 // (k=v,...) plus gocached.node_tag from GOCACHED_NODE_TAG; exporters from
 // GOCACHED_TRACE_FILE and the OTEL_EXPORTER_OTLP_* variables; span types to
-// drop from GOCACHED_TRACE_SKIP (comma list, see Skip). Warnings go to
+// drop from GOCACHED_TRACE_SKIP (comma list, see Skip); Rusage from
+// GOCACHED_TRACE_RUSAGE (any non-empty value). Warnings go to
 // warn. On error the returned Config is still usable with whatever parsed,
 // so callers can fail open.
 func ConfigFromEnviron(environ []string, warn io.Writer) (Config, error) {
@@ -52,6 +54,7 @@ func ConfigFromEnviron(environ []string, warn io.Writer) (Config, error) {
 		Service:    e.Service,
 		Attrs:      []Attr(e.Attrs),
 		Warn:       warn,
+		Rusage:     e.Rusage != "",
 	}
 	for _, typ := range strings.Split(e.Skip, ",") {
 		if typ = strings.TrimSpace(typ); typ != "" {

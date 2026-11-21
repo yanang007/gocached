@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `trace begin` and `trace exec` take `-k internal|server|client|producer|consumer` (default `internal`) to set the span kind; tool and `GOCACHEPROG` spans stay internal.
 - `trace end --exit-code N` sets `process.exit.code` and, when N is not 0, status error, as `trace exec` does; `--status ok|error` sets the status directly and `-m` its message.
 - `gocached trace set -a k=v...` adds attributes to the open span in `TRACEPARENT`. Each call writes its own file, merged when the span ends or is exported, so concurrent calls are safe. Like the other trace commands it warns and exits 0 on runtime errors.
+- `GOCACHED_TRACE_RUSAGE`: when set, toolexec tool spans and `trace exec` spans carry the child process's CPU user and system time (`gocached.cpu.user`, `gocached.cpu.system`, double seconds) and peak memory (`gocached.memory.peak`, int bytes; `Rusage.Maxrss` on Unix, `PeakWorkingSetSize` on Windows). Off by default.
 
 ### Changed
 

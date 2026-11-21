@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/yanang007/gocached/internal/rusage"
 )
 
 // Hook observes tool invocations. It gets copies of the event and result and
@@ -23,7 +25,8 @@ type Hook interface {
 type Result struct {
 	Start, End time.Time
 	ExitCode   int
-	Err        error // set when the tool could not be started or waited for
+	Err        error        // set when the tool could not be started or waited for
+	Usage      rusage.Usage // CPU time and peak memory of the tool
 }
 
 // Options configures Run.
@@ -56,16 +59,18 @@ func Run(args []string, opts Options) int {
 		env = os.Environ()
 	}
 	if !opts.Trace {
-		return exitCode(runTool(args, env, opts), opts.Stderr)
+		_, err := runTool(args, env, opts)
+		return exitCode(err, opts.Stderr)
 	}
 	ev := Parse(args, lookupEnv(env, "TOOLEXEC_IMPORTPATH"))
 	for _, h := range opts.Hooks {
 		callHook(opts.Warn, "before", func() error { return h.Before(copyEvent(ev)) })
 	}
 	res := Result{Start: time.Now()}
-	err := runTool(args, env, opts)
+	usage, err := runTool(args, env, opts)
 	res.End = time.Now()
 	res.ExitCode = exitCode(err, opts.Stderr)
+	res.Usage = usage
 	var exitErr *exec.ExitError
 	if err != nil && !errors.As(err, &exitErr) {
 		res.Err = err
@@ -76,11 +81,11 @@ func Run(args []string, opts Options) int {
 	return res.ExitCode
 }
 
-func runTool(args, env []string, opts Options) error {
+func runTool(args, env []string, opts Options) (rusage.Usage, error) {
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Env = env
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = opts.Stdin, opts.Stdout, opts.Stderr
-	return cmd.Run()
+	return rusage.Run(cmd, nil)
 }
 
 // exitCode maps the tool's run error to the wrapper's exit code: the tool's

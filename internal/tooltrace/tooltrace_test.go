@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yanang007/gocached/internal/rusage"
 	"github.com/yanang007/gocached/internal/toolexec"
 	"github.com/yanang007/gocached/internal/tooltrace"
 	"github.com/yanang007/gocached/internal/tracing"
@@ -192,5 +193,40 @@ func TestMalformedTraceparentWarnsAndWritesNothing(t *testing.T) {
 		toolexec.Result{Start: time.Now(), End: time.Now()})
 	if entries, _ := os.ReadDir(dir); len(entries) != 0 || !strings.Contains(stderr, "TRACEPARENT") {
 		t.Errorf("wrote %d files, stderr %q; want nothing and a warning", len(entries), stderr)
+	}
+}
+
+func TestResourceUsageAttributesOnlyWithTraceRusage(t *testing.T) {
+	res := toolexec.Result{Start: time.Now(), End: time.Now(),
+		Usage: rusage.Usage{User: 1500 * time.Millisecond, System: 250 * time.Millisecond, PeakMemory: 64 << 20}}
+	keys := []string{"gocached.cpu.user", "gocached.cpu.system", "gocached.memory.peak"}
+
+	dir := t.TempDir()
+	runHooks(t, []string{"TRACEPARENT=" + parent, "GOCACHED_TRACE_SESSION_DIR=" + dir}, compile, res)
+	plain := spooled(t, dir)[0]
+	for _, k := range keys {
+		if got := attr(plain, k); got != "" {
+			t.Errorf("without GOCACHED_TRACE_RUSAGE: %s = %q, want absent", k, got)
+		}
+	}
+
+	dir = t.TempDir()
+	runHooks(t, []string{"TRACEPARENT=" + parent, "GOCACHED_TRACE_SESSION_DIR=" + dir, "GOCACHED_TRACE_RUSAGE=1"}, compile, res)
+	s := spooled(t, dir)[0]
+	want := map[string]tracing.Value{
+		"gocached.cpu.user":    tracing.Double(1.5),
+		"gocached.cpu.system":  tracing.Double(0.25),
+		"gocached.memory.peak": tracing.Int(67108864),
+	}
+	for _, a := range s.Attrs {
+		if w, ok := want[a.Key]; ok {
+			if a.Value != w {
+				t.Errorf("%s = %v (type %v), want %v (type %v)", a.Key, a.Value, a.Value.Type, w, w.Type)
+			}
+			delete(want, a.Key)
+		}
+	}
+	for k := range want {
+		t.Errorf("with GOCACHED_TRACE_RUSAGE: %s missing", k)
 	}
 }
