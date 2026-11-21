@@ -104,9 +104,8 @@ type otlpStatus struct {
 }
 
 const (
-	scopeName        = "github.com/yanang007/gocached"
-	spanKindInternal = 1
-	serviceNameKey   = "service.name"
+	scopeName      = "github.com/yanang007/gocached"
+	serviceNameKey = "service.name"
 )
 
 // WriteOTLP writes spans to w as one OTLP JSON ExportTraceServiceRequest,
@@ -163,12 +162,16 @@ func ReadOTLP(r io.Reader) ([]Span, error) {
 }
 
 func toOTLP(s Span) otlpSpan {
+	kind := s.Kind
+	if kind == KindUnspecified {
+		kind = KindInternal
+	}
 	o := otlpSpan{
 		TraceID:           s.TraceID.String(),
 		SpanID:            s.SpanID.String(),
 		TraceState:        s.TraceState,
 		Name:              s.Name,
-		Kind:              spanKindInternal,
+		Kind:              int(kind),
 		StartTimeUnixNano: unixNano(s.Start),
 		EndTimeUnixNano:   unixNano(s.End),
 		Status:            otlpStatus{Code: int(s.Status.Code), Message: s.Status.Message},
@@ -203,6 +206,7 @@ func fromOTLP(o otlpSpan) (Span, error) {
 		return s, err
 	}
 	s.TraceState, s.Name = o.TraceState, o.Name
+	s.Kind = SpanKind(o.Kind)
 	s.Status = Status{Code: StatusCode(o.Status.Code), Message: o.Status.Message}
 	for _, a := range o.Attributes {
 		v, err := fromOTLPValue(a.Key, a.Value)

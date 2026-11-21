@@ -6,6 +6,7 @@ package tracing
 
 import (
 	"crypto/rand"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -21,6 +22,7 @@ type Span struct {
 	Name         string
 	Service      string // resource attribute service.name
 	Start, End   time.Time
+	Kind         SpanKind // the zero value is exported as internal
 	Attrs        []Attr
 	Status       Status
 }
@@ -89,6 +91,34 @@ func (v Value) String() string {
 		return strconv.FormatBool(v.AsBool())
 	}
 	return v.str
+}
+
+// SpanKind is the OTLP span kind.
+type SpanKind int
+
+// OTLP span kinds.
+const (
+	KindUnspecified SpanKind = 0
+	KindInternal    SpanKind = 1
+	KindServer      SpanKind = 2
+	KindClient      SpanKind = 3
+	KindProducer    SpanKind = 4
+	KindConsumer    SpanKind = 5
+)
+
+var kindNames = map[string]SpanKind{
+	"internal": KindInternal, "server": KindServer, "client": KindClient,
+	"producer": KindProducer, "consumer": KindConsumer,
+}
+
+// ParseKind parses a span kind name: internal, server, client, producer or
+// consumer.
+func ParseKind(s string) (SpanKind, error) {
+	k, ok := kindNames[s]
+	if !ok {
+		return 0, fmt.Errorf("span kind %q: want internal, server, client, producer or consumer", s)
+	}
+	return k, nil
 }
 
 // StatusCode is the OTLP span status code.

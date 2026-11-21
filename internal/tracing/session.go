@@ -32,8 +32,9 @@ type Config struct {
 	// Key (GOCACHED_TRACE_KEY) derives the outermost span ID, the trace ID
 	// when there is no parent, and the session directory name.
 	Key       string
-	Service   string // service.name of new spans
-	Attrs     []Attr // attributes of new spans
+	Service   string   // service.name of new spans
+	Attrs     []Attr   // attributes of new spans
+	Kind      SpanKind // kind of spans opened by Begin; zero is internal
 	Exporters []Exporter
 	// Warn receives warnings that do not stop the operation, such as a
 	// non-empty GOCACHED_TRACE_SESSION_DIR. Nil discards them.
@@ -120,6 +121,7 @@ func (c Config) isOpen(sc trace.SpanContext) bool {
 func (c Config) Begin(parent trace.SpanContext, name string, attrs []Attr) (trace.SpanContext, error) {
 	outermost := !c.isOpen(parent)
 	s := c.NewSpan(parent, name)
+	s.Kind = c.Kind
 	s.Attrs = MergeAttrs(s.Attrs, attrs...)
 	if outermost && c.Key != "" {
 		s.SpanID = keySpanID(c.Key)
@@ -150,12 +152,25 @@ func (c Config) Begin(parent trace.SpanContext, name string, attrs []Attr) (trac
 	return Context(s, flags), nil
 }
 
-// End closes the open span cur, adding attrs to it, spools it as finished
+// End closes the open span cur, adding the attributes of Set and then attrs, spools it as finished
 // and returns its parent's context: the parent span, or an invalid context
 // when cur is a root. outermost reports whether cur was the outermost span
 // of its session, the one whose end may export it.
 func (c Config) End(cur trace.SpanContext, attrs []Attr) (parent trace.SpanContext, outermost bool, err error) {
 	return c.EndStatus(cur, attrs, Status{})
+}
+
+// Set adds attrs to the open span cur. Each call writes its own attribute
+// file next to the open record, so concurrent calls never lose each other's
+// attributes; End and Export merge them in the order they were written.
+func (c Config) Set(cur trace.SpanContext, attrs []Attr) error {
+	if !cur.IsValid() {
+		return errors.New("no current span (TRACEPARENT is not set)")
+	}
+	if !c.isOpen(cur) {
+		return fmt.Errorf("span %s is not open in session %s", cur.SpanID(), c.SessionDirFor(cur.TraceID()))
+	}
+	return writeAttrFile(c.SessionDirFor(cur.TraceID()), cur, attrs)
 }
 
 // EndStatus is End that also sets the span's status.
@@ -175,15 +190,24 @@ func (c Config) EndStatus(cur trace.SpanContext, attrs []Attr, status Status) (p
 	if len(spans) != 1 {
 		return cur, false, fmt.Errorf("%s: want one span, got %d", path, len(spans))
 	}
+	attrPaths, setAttrs, err := readAttrFiles(dir, cur.SpanID())
+	if err != nil {
+		return cur, false, err
+	}
 	s := spans[0]
 	s.End = time.Now()
-	s.Attrs = MergeAttrs(s.Attrs, attrs...)
+	s.Attrs = MergeAttrs(MergeAttrs(s.Attrs, setAttrs...), attrs...)
 	s.Status = status
 	if err := WriteSpool(dir, []Span{s}); err != nil {
 		return cur, false, err
 	}
 	if err := os.Remove(path); err != nil {
 		return cur, false, err
+	}
+	for _, p := range attrPaths {
+		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return cur, false, err
+		}
 	}
 	if s.ParentSpanID.IsValid() {
 		parent = trace.NewSpanContext(trace.SpanContextConfig{

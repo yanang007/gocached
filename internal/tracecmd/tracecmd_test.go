@@ -3,6 +3,7 @@ package tracecmd_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -119,6 +120,8 @@ type exportedSpan struct {
 	Attrs                               map[string]string
 	Types                               map[string]string // OTLP value field per attribute: "string" or "int"
 	StatusCode                          int
+	StatusMessage                       string
+	Kind                                int
 }
 
 func exported(t *testing.T, path string) []exportedSpan {
@@ -142,11 +145,15 @@ func exported(t *testing.T, path string) []exportedSpan {
 						Name         string
 						SpanID       string `json:"spanId"`
 						ParentSpanID string `json:"parentSpanId"`
+						Kind         int
 						Attributes   []struct {
 							Key   string
 							Value struct{ StringValue, IntValue *string }
 						}
-						Status struct{ Code int }
+						Status struct {
+							Code    int
+							Message string
+						}
 					}
 				}
 			}
@@ -164,7 +171,7 @@ func exported(t *testing.T, path string) []exportedSpan {
 			for _, ss := range rs.ScopeSpans {
 				for _, s := range ss.Spans {
 					e := exportedSpan{Service: service, Name: s.Name, SpanID: s.SpanID, ParentSpanID: s.ParentSpanID,
-						Attrs: map[string]string{}, Types: map[string]string{}, StatusCode: s.Status.Code}
+						Attrs: map[string]string{}, Types: map[string]string{}, StatusCode: s.Status.Code, StatusMessage: s.Status.Message, Kind: s.Kind}
 					for _, a := range s.Attributes {
 						switch {
 						case a.Value.IntValue != nil:
@@ -281,5 +288,164 @@ func TestBeginEndWithoutTraceparentEndsWithEmptyAtRoot(t *testing.T) {
 	}
 	if got := sh.export("end"); got != "" {
 		t.Errorf("root end printed %q, want empty", got)
+	}
+}
+
+func TestKindFromBeginAndExecDefaultsToInternal(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "trace.jsonl")
+	sh := newShell(t, "GOCACHED_TRACE_FILE="+file)
+	sh.export("begin", "-n", "pipeline", "-k", "server")
+	sh.export("begin", "-n", "plain")
+	sh.export("end")
+	if code, _ := sh.exec([]string{childEnv + "=exit:0"}, "-n", "deploy", "-k", "client", "--", self(t)); code != 0 {
+		t.Fatalf("exec exit %d", code)
+	}
+	sh.export("begin", "-n", "queue", "-k", "consumer")
+	sh.export("end")
+	sh.export("end", "--export")
+	spans := spansByName(t, file, 4)
+	// OTLP span kinds: 1 internal, 2 server, 3 client, 5 consumer.
+	want := map[string]int{"pipeline": 2, "plain": 1, "deploy": 3, "queue": 5}
+	for name, kind := range want {
+		if got := spans[name].Kind; got != kind {
+			t.Errorf("span %s kind %d, want %d", name, got, kind)
+		}
+	}
+}
+
+func TestBadKindIsAUsageError(t *testing.T) {
+	var out, errb bytes.Buffer
+	code := tracecmd.Run([]string{"begin", "-k", "sideways"}, tracecmd.Options{Environ: newShell(t).environ(), Stdout: &out, Stderr: &errb})
+	if code != 2 {
+		t.Errorf("begin -k sideways exited %d, want 2", code)
+	}
+}
+
+func TestEndSetsStatusFromExitCodeOrFlags(t *testing.T) {
+	cases := []struct {
+		name     string
+		args     []string
+		code     int
+		message  string
+		exitAttr string
+	}{
+		{"exit code 3", []string{"--exit-code", "3"}, 2, "exit status 3", "3"},
+		{"exit code 0", []string{"--exit-code", "0"}, 0, "", "0"},
+		{"status ok", []string{"--status", "ok"}, 1, "", ""},
+		{"status error with message", []string{"--status", "error", "-m", "tests failed"}, 2, "tests failed", ""},
+		{"status overrides exit code", []string{"--exit-code", "3", "--status", "ok"}, 1, "", "3"},
+		{"message overrides exit code message", []string{"--exit-code", "3", "-m", "lint"}, 2, "lint", "3"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "trace.jsonl")
+			sh := newShell(t, "GOCACHED_TRACE_FILE="+file)
+			sh.export("begin", "-n", "job")
+			sh.export(append([]string{"end", "--export"}, c.args...)...)
+			s := spansByName(t, file, 1)["job"]
+			if s.StatusCode != c.code || s.StatusMessage != c.message {
+				t.Errorf("status %d %q, want %d %q", s.StatusCode, s.StatusMessage, c.code, c.message)
+			}
+			if s.Attrs["process.exit.code"] != c.exitAttr {
+				t.Errorf("process.exit.code %q, want %q", s.Attrs["process.exit.code"], c.exitAttr)
+			}
+			if c.exitAttr != "" && s.Types["process.exit.code"] != "int" {
+				t.Errorf("process.exit.code is a %s, want an int", s.Types["process.exit.code"])
+			}
+		})
+	}
+}
+
+func TestBadEndStatusIsAUsageError(t *testing.T) {
+	for _, args := range [][]string{{"end", "--status", "maybe"}, {"end", "--exit-code", "x"}} {
+		var out, errb bytes.Buffer
+		if code := tracecmd.Run(args, tracecmd.Options{Environ: newShell(t).environ(), Stdout: &out, Stderr: &errb}); code != 2 {
+			t.Errorf("%v exited %d, want 2", args, code)
+		}
+	}
+}
+
+func TestConcurrentSetCallsAllLandOnTheSpan(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "trace.jsonl")
+	sh := newShell(t, "GOCACHED_TRACE_FILE="+file)
+	sh.export("begin", "-n", "job", "-a", "keep=begin")
+	environ := sh.environ()
+	const n = 20
+	errs := make(chan string, n)
+	for i := range n {
+		go func() {
+			var out, errb bytes.Buffer
+			code := tracecmd.Run([]string{"set", "-a", fmt.Sprintf("k%d=v%d", i, i)}, tracecmd.Options{Environ: environ, Stdout: &out, Stderr: &errb})
+			if code != 0 || out.Len() > 0 || errb.Len() > 0 {
+				errs <- fmt.Sprintf("set %d: exit %d, stdout %q, stderr %q", i, code, out.String(), errb.String())
+				return
+			}
+			errs <- ""
+		}()
+	}
+	for range n {
+		if e := <-errs; e != "" {
+			t.Error(e)
+		}
+	}
+	sh.export("end", "--export", "-a", "last=end")
+	s := spansByName(t, file, 1)["job"]
+	for i := range n {
+		if k := fmt.Sprintf("k%d", i); s.Attrs[k] != fmt.Sprintf("v%d", i) {
+			t.Errorf("attribute %s = %q, want v%d", k, s.Attrs[k], i)
+		}
+	}
+	if s.Attrs["keep"] != "begin" || s.Attrs["last"] != "end" {
+		t.Errorf("attributes %v, want keep=begin and last=end too", s.Attrs)
+	}
+}
+
+func TestLaterSetOverridesEarlierAndEndOverridesSet(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "trace.jsonl")
+	sh := newShell(t, "GOCACHED_TRACE_FILE="+file)
+	sh.export("begin", "-n", "job")
+	sh.run("set", "-a", "result=first", "-a", "step=1")
+	sh.run("set", "-a", "result=second")
+	sh.export("end", "--export", "-a", "step=2")
+	s := spansByName(t, file, 1)["job"]
+	if s.Attrs["result"] != "second" || s.Attrs["step"] != "2" {
+		t.Errorf("attributes %v, want result=second step=2", s.Attrs)
+	}
+}
+
+func TestExportOfAnOpenSpanIncludesSetAttributes(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "trace.jsonl")
+	base := t.TempDir()
+	sh := newShell(t, "GOCACHED_TRACE_FILE="+file, "GOCACHED_TRACE_BASE_DIR="+base)
+	sh.export("begin", "-n", "killed")
+	sh.run("set", "-a", "stage=deploy")
+	sh.run("export")
+	s := spansByName(t, file, 1)["killed"]
+	if s.Attrs["stage"] != "deploy" || s.StatusCode != 2 {
+		t.Errorf("span %+v, want stage=deploy and status error", s)
+	}
+	if entries, _ := os.ReadDir(base); len(entries) != 0 {
+		t.Errorf("session not emptied: %v", entries)
+	}
+}
+
+func TestSetWithoutAnOpenSpanWarnsAndExitsZero(t *testing.T) {
+	for _, tp := range []string{"", jenkins} {
+		sh := newShell(t, "TRACEPARENT="+tp)
+		if out, stderr := sh.run("set", "-a", "k=v"); out != "" || !strings.Contains(stderr, "warning") {
+			t.Errorf("set under %q printed %q, stderr %q; want nothing and a warning", tp, out, stderr)
+		}
+	}
+}
+
+func TestSetAndEndRejectSpanFlagsTheyIgnore(t *testing.T) {
+	for _, args := range [][]string{
+		{"set", "-n", "x"}, {"set", "-s", "svc"}, {"set", "-k", "server"},
+		{"end", "-n", "x"}, {"end", "-s", "svc"}, {"end", "-k", "server"},
+	} {
+		var out, errb bytes.Buffer
+		if code := tracecmd.Run(args, tracecmd.Options{Environ: newShell(t).environ(), Stdout: &out, Stderr: &errb}); code != 2 {
+			t.Errorf("%v exited %d, want 2", args, code)
+		}
 	}
 }

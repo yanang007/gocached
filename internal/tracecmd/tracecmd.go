@@ -1,4 +1,4 @@
-// Package tracecmd implements `gocached trace begin|end|export|exec` (ADR
+// Package tracecmd implements `gocached trace begin|end|set|export|exec` (ADR
 // 0007). Usage errors (bad flags, unknown command) exit 2. Otherwise every
 // command fails open: it warns on stderr and exits 0 on its own errors
 // (exec exits with its command's code), and begin and end print the
@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/yanang007/gocached/internal/tracectx"
@@ -23,7 +24,7 @@ type Options struct {
 	Stdout, Stderr io.Writer
 }
 
-const usage = "usage: gocached trace begin [-n name] [-s service] [-a k=v]... | end [-a k=v]... [--export] | export [--all] | exec [-n name] [-s service] [-a k=v]... -- cmd [args...]"
+const usage = "usage: gocached trace begin [-n name] [-s service] [-k kind] [-a k=v]... | end [-a k=v]... [--exit-code N] [--status ok|error] [-m message] [--export] | set -a k=v... | export [--all] | exec [-n name] [-s service] [-k kind] [-a k=v]... -- cmd [args...]"
 
 // Run runs `gocached trace args...` and returns its exit code. A usage
 // error (bad flags, unknown command) is misuse and exits 2. Runtime errors
@@ -39,6 +40,8 @@ func Run(args []string, opts Options) int {
 		return begin(args[1:], opts)
 	case "end":
 		return end(args[1:], opts)
+	case "set":
+		return set(args[1:], opts)
 	case "export":
 		return export(args[1:], opts)
 	case "exec":
@@ -50,29 +53,42 @@ func Run(args []string, opts Options) int {
 }
 
 // SpanFlags are the flags that describe a span: -n name, -s service and
-// repeatable -a key=value. `trace exec` (#29) reuses them.
+// repeatable -a key=value, and -k kind. `trace exec` reuses them.
 type SpanFlags struct {
 	Name    string
 	Service string
 	Attrs   []tracing.Attr
+	Kind    tracing.SpanKind
 }
 
-// Register adds -n, -s and -a to fs, with defaultName for -n.
+// Register adds -n, -s, -a and -k to fs, with defaultName for -n.
 func (f *SpanFlags) Register(fs *flag.FlagSet, defaultName string) {
 	fs.StringVar(&f.Name, "n", defaultName, "span `name`")
 	fs.StringVar(&f.Service, "s", "", "`service` name (default $OTEL_SERVICE_NAME)")
+	registerAttrs(fs, &f.Attrs)
+	fs.Func("k", "span `kind`: internal (default), server, client, producer or consumer", func(s string) error {
+		k, err := tracing.ParseKind(s)
+		f.Kind = k
+		return err
+	})
+}
+
+// registerAttrs adds the repeatable -a key=value flag to fs, merging into
+// attrs.
+func registerAttrs(fs *flag.FlagSet, attrs *[]tracing.Attr) {
 	fs.Func("a", "span attribute `key=value`, repeatable (adds to or overrides $GOCACHED_TRACE_ATTRS)", func(s string) error {
 		a, err := tracing.ParseAttr(s)
 		if err != nil {
 			return err
 		}
-		f.Attrs = tracing.MergeAttrs(f.Attrs, a)
+		*attrs = tracing.MergeAttrs(*attrs, a)
 		return nil
 	})
 }
 
-// Apply returns cfg with the -s override.
+// Apply returns cfg with the -s and -k overrides.
 func (f SpanFlags) Apply(cfg tracing.Config) tracing.Config {
+	cfg.Kind = f.Kind
 	if f.Service != "" {
 		cfg.Service = f.Service
 	}
@@ -96,18 +112,55 @@ func begin(args []string, opts Options) int {
 
 func end(args []string, opts Options) int {
 	fs := newFlagSet("trace end", opts)
-	var sf SpanFlags
-	sf.Register(fs, "")
+	var attrs []tracing.Attr
+	registerAttrs(fs, &attrs)
 	export := fs.Bool("export", false, "also export the session")
+	exitCode := fs.String("exit-code", "", "set process.exit.code, and status error when not 0")
+	statusFlag := fs.String("status", "", "set the span status: ok or error (overrides --exit-code)")
+	message := fs.String("m", "", "status `message`")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	tp, err := End(opts.Environ, sf.Attrs, *export, opts.Stderr)
+	attrs, status, err := endStatus(attrs, *exitCode, *statusFlag, *message)
+	if err != nil {
+		fmt.Fprintf(opts.Stderr, "gocached trace end: %v\n%s\n", err, usage)
+		return 2
+	}
+	tp, err := closeSpan("end", opts.Environ, attrs, status, func(bool) bool { return *export }, opts.Stderr)
 	fmt.Fprintln(opts.Stdout, tp)
 	if err != nil {
 		warn(opts.Stderr, "end", err)
 	}
 	return 0
+}
+
+// endStatus turns the --exit-code, --status and -m flags of `trace end`
+// into the attributes and status of the span. An exit code sets
+// process.exit.code and, when not 0, status error as `trace exec` does;
+// --status replaces that status and -m its message.
+func endStatus(attrs []tracing.Attr, exitCode, status, message string) ([]tracing.Attr, tracing.Status, error) {
+	var st tracing.Status
+	if exitCode != "" {
+		code, err := strconv.Atoi(exitCode)
+		if err != nil {
+			return nil, st, fmt.Errorf("--exit-code %q: want an integer", exitCode)
+		}
+		attrs = tracing.MergeAttrs(attrs, tracing.Attr{Key: tracing.ExitCodeAttr, Value: tracing.Int(int64(code))})
+		st = tracing.ExitStatus(code, nil)
+	}
+	switch status {
+	case "":
+	case "ok":
+		st = tracing.Status{Code: tracing.StatusOK}
+	case "error":
+		st = tracing.Status{Code: tracing.StatusError}
+	default:
+		return nil, st, fmt.Errorf("--status %q: want ok or error", status)
+	}
+	if message != "" {
+		st.Message = message
+	}
+	return attrs, st, nil
 }
 
 // Begin opens a child of the span in environ's TRACEPARENT (a root without
@@ -160,6 +213,33 @@ func closeSpan(cmd string, environ []string, attrs []tracing.Attr, status tracin
 		return tp, cfg.Export(cfg.SessionDirFor(cur.TraceID()))
 	}
 	return tp, nil
+}
+
+func set(args []string, opts Options) int {
+	fs := newFlagSet("trace set", opts)
+	var attrs []tracing.Attr
+	registerAttrs(fs, &attrs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if err := Set(opts.Environ, attrs, opts.Stderr); err != nil {
+		warn(opts.Stderr, "set", err)
+	}
+	return 0
+}
+
+// Set adds attrs to the open span in environ's TRACEPARENT; End and Export
+// merge them into it. Concurrent calls are safe.
+func Set(environ []string, attrs []tracing.Attr, stderr io.Writer) error {
+	cur, err := tracectx.FromEnviron(environ)
+	if err != nil {
+		return err
+	}
+	cfg, cfgErr := tracing.ConfigFromEnviron(environ, stderr)
+	if cfgErr != nil {
+		warn(stderr, "set", cfgErr)
+	}
+	return cfg.Set(cur, attrs)
 }
 
 func export(args []string, opts Options) int {

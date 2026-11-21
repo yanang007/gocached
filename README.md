@@ -260,10 +260,13 @@ export TRACEPARENT=$(gocached trace end --export)           # back to the CI's s
 
 | Command | What it does |
 | ------- | ------------ |
-| `trace begin [-n name] [-s service] [-a k=v]...` | Opens a child of the current span (a new root without one) and prints its traceparent. |
-| `trace end [-a k=v]... [--export]` | Closes the current span and prints its parent's traceparent, empty at the root. `--export` also exports the session. |
+| `trace begin [-n name] [-s service] [-k kind] [-a k=v]...` | Opens a child of the current span (a new root without one) and prints its traceparent. `-k` sets the span kind: `internal` (default), `server`, `client`, `producer` or `consumer`. |
+| `trace end [-a k=v]... [--exit-code N] [--status ok|error] [-m message] [--export]` | Closes the current span and prints its parent's traceparent, empty at the root. `--exit-code N` sets attribute `process.exit.code` and, when N is not 0, status error, as `trace exec` does; `--status` sets the status directly (overriding `--exit-code`) and `-m` its message. `--export` also exports the session. |
+| `trace set -a k=v...` | Adds attributes to the current span, which must be open (begun by `trace begin` or `trace exec`). Each call writes its own file next to the span, so concurrent calls are safe; the attributes are merged when the span ends or is exported, later calls overriding earlier ones and `trace end -a` overriding both. Prints nothing. |
 | `trace export [--all]` | Exports the current session, or with `--all` every session under the base dir. Spans still open are closed now with status error. |
-| `trace exec [-n name] [-s service] [-a k=v]... -- cmd [args...]` | Runs `cmd` in a child of the current span (`-n` defaults to `cmd`) with `TRACEPARENT` set to it, then closes the span with attribute `process.exit.code`, status error if it is not 0. Exports the session when the span is the outermost one, so nested `trace exec` calls and `trace exec` inside `begin`/`end` export once, at the top. Exits with `cmd`'s exit code (127 if it cannot start, 128+n if signal n kills it); interrupt and terminate signals are forwarded to `cmd`, and the span is still closed and exported. |
+| `trace exec [-n name] [-s service] [-k kind] [-a k=v]... -- cmd [args...]` | Runs `cmd` in a child of the current span (`-n` defaults to `cmd`, `-k` as for `begin`) with `TRACEPARENT` set to it, then closes the span with attribute `process.exit.code`, status error if it is not 0. Exports the session when the span is the outermost one, so nested `trace exec` calls and `trace exec` inside `begin`/`end` export once, at the top. Exits with `cmd`'s exit code (127 if it cannot start, 128+n if signal n kills it); interrupt and terminate signals are forwarded to `cmd`, and the span is still closed and exported. |
+
+Spans of `begin` and `exec` are `internal` unless `-k` says otherwise; tool and `GOCACHEPROG` spans are always `internal`.
 
 Finished spans are written as OTLP JSON files into a trace session directory and stay there until exported, so spans of a killed job can be exported later. Exporting empties the directory; if the exporter fails, the files are kept.
 

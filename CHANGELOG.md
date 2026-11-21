@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- `trace begin` and `trace exec` take `-k internal|server|client|producer|consumer` (default `internal`) to set the span kind; tool and `GOCACHEPROG` spans stay internal.
+- `trace end --exit-code N` sets `process.exit.code` and, when N is not 0, status error, as `trace exec` does; `--status ok|error` sets the status directly and `-m` its message.
+- `gocached trace set -a k=v...` adds attributes to the open span in `TRACEPARENT`. Each call writes its own file, merged when the span ends or is exported, so concurrent calls are safe. Like the other trace commands it warns and exits 0 on runtime errors.
+
 ### Changed
 
 - **Breaking:** span attributes are typed. `process.exit.code`, `gocached.exit_code`, `gocached.size` (bytes) and `gocached.batch_size` are now exported as OTLP `intValue` instead of `stringValue`; queries and dashboards that compare them as strings must change. Attributes from `-a` and `GOCACHED_TRACE_ATTRS` stay strings. Spooled spans are read back with their types.
