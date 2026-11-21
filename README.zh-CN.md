@@ -268,7 +268,7 @@ export TRACEPARENT=$(gocached trace end --export)           # 回到 CI 的 span
 
 `begin` 和 `exec` 的 span 默认是 `internal`，可用 `-k` 改变；工具 span 和 `GOCACHEPROG` span 始终是 `internal`。
 
-已结束的 span 以 OTLP JSON 文件写入追踪会话目录，在导出前一直保留，所以被杀掉的任务的 span 也能事后导出。导出会清空该目录；导出器失败时文件保留。
+已结束的 span 以 OTLP JSON 文件写入追踪会话目录，在导出前一直保留，所以被杀掉的任务的 span 也能事后导出。导出时 span 按批发送，每批 `GOCACHED_TRACE_EXPORT_BATCH` 个 span（默认 512），同时发送 `GOCACHED_TRACE_EXPORT_CONCURRENCY` 批（默认 4），尽量以整个文件组批。一个文件的所有 span 都发送成功后才删除该文件，因此某批失败时只保留该批的文件，下次导出再发送它们。大于一批的文件会被拆分；若只发送了其中一部分，则整个文件保留，重试时已发送的 span 会再次发送（后端按 span ID 去重）。每次导出一个会话后，gocached 在 stderr 上为会话中的每个 trace 打印一行 `gocached trace: exported N spans of trace <trace_id>`（共享的 `GOCACHED_TRACE_SESSION_DIR` 可能包含多个 trace）；设置了 `GOCACHED_TRACE_URL_TEMPLATE`（例如 `https://jaeger.intra/trace/{trace_id}`）时，行尾打印该 URL 而不是 trace ID。
 
 span 属性在 OTLP JSON 中带有类型。`process.exit.code`、`gocached.exit_code`、`gocached.size`（单位为字节）和 `gocached.batch_size` 是整数（`intValue`，按 OTLP JSON 对 64 位整数的写法为十进制字符串）；其余所有属性，包括来自 `-a` 和 `GOCACHED_TRACE_ATTRS` 的属性，都是字符串（`stringValue`）。设置 `GOCACHED_TRACE_RUSAGE` 时，`gocached.cpu.user` 和 `gocached.cpu.system` 是浮点数（`doubleValue`），`gocached.memory.peak` 是整数。
 
@@ -282,7 +282,9 @@ span 属性在 OTLP JSON 中带有类型。`process.exit.code`、`gocached.exit_
 | `GOCACHED_TRACE_BASE_DIR` | 会话目录的上级目录（默认 `<tmp>/gocached-trace`），每个会话目录以 `GOCACHED_TRACE_KEY` 的哈希或 trace ID 命名。 |
 | `GOCACHED_TRACE_RUSAGE` | 任意非空值会把子进程的资源用量加到 [toolexec span](#toolexec-span) 和 `trace exec` 的 span 上：`gocached.cpu.user` 和 `gocached.cpu.system`（CPU 秒数，浮点数）以及 `gocached.memory.peak`（峰值常驻内存字节数，整数：Linux 和 macOS 上取自 `Maxrss`，Windows 上为峰值工作集；无法获取时省略）。默认关闭。 |
 | `GOCACHED_TRACE_FILE` | 导出到此文件，每次导出追加一个 OTLP JSON 文档。 |
-| `OTEL_EXPORTER_OTLP_ENDPOINT`、`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`、`..._HEADERS`、`..._TIMEOUT` | 以 JSON 导出到 OTLP/HTTP 端点。不支持 gRPC。 |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`、`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`、`..._HEADERS`、`..._TIMEOUT`、`..._COMPRESSION` | 以 JSON 导出到 OTLP/HTTP 端点。`OTEL_EXPORTER_OTLP_[TRACES_]COMPRESSION` 取 `gzip` 或 `none`（默认）。不支持 gRPC。 |
+| `GOCACHED_TRACE_EXPORT_BATCH`、`GOCACHED_TRACE_EXPORT_CONCURRENCY` | 每个导出请求最多的 span 数（默认 512）和同时进行的最多请求数（默认 4）。 |
+| `GOCACHED_TRACE_URL_TEMPLATE` | 导出后打印的 trace URL，其中 `{trace_id}` 被替换。 |
 
 追踪从不阻塞或改变 go 自身的构建，即使所有追踪组件都失效（例如未来的 go 版本让解析失效）也是如此。追踪命令的误用（错误的 flag、未知的子命令）会以非零状态退出。遇到运行时错误（`TRACEPARENT` 格式错误、目录不可写、收集器不可达）时，追踪命令在 stderr 打印警告并以 0 退出，`begin` 和 `end` 会原样打印 `TRACEPARENT`。`begin` 若发现同一 `GOCACHED_TRACE_KEY` 的崩溃运行留下的自身 span 仍处于打开状态，会给出警告并重新开始该 span。参见 `docs/adr/0007-trace-context-in-traceparent-spans-in-a-spool.md`。
 

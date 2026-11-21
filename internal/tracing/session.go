@@ -9,6 +9,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
@@ -36,6 +38,16 @@ type Config struct {
 	Attrs     []Attr   // attributes of new spans
 	Kind      SpanKind // kind of spans opened by Begin; zero is internal
 	Exporters []Exporter
+	// Batch (GOCACHED_TRACE_EXPORT_BATCH) is the most spans sent in one
+	// export request; 0 means DefaultExportBatch.
+	Batch int
+	// Concurrency (GOCACHED_TRACE_EXPORT_CONCURRENCY) is the most batches
+	// sent at once; 0 means DefaultExportConcurrency.
+	Concurrency int
+	// URLTemplate (GOCACHED_TRACE_URL_TEMPLATE), if set, is the trace's
+	// address in a backend, with {trace_id} replaced by the trace ID. Export
+	// reports it instead of the bare trace ID.
+	URLTemplate string
 	// Warn receives warnings that do not stop the operation, such as a
 	// non-empty GOCACHED_TRACE_SESSION_DIR. Nil discards them.
 	Warn io.Writer
@@ -45,6 +57,12 @@ type Config struct {
 
 	skip map[string]bool // span types from GOCACHED_TRACE_SKIP, see Skip
 }
+
+// Export batching defaults.
+const (
+	DefaultExportBatch       = 512
+	DefaultExportConcurrency = 4
+)
 
 // DefaultBaseDir is <tmp>/gocached-trace.
 func DefaultBaseDir() string {
@@ -223,12 +241,25 @@ func (c Config) EndStatus(cur trace.SpanContext, attrs []Attr, status Status) (p
 
 // Export sends every span in session directory dir through each exporter,
 // closing spans still open now with status error, and then empties the
-// session. If an exporter fails, the spool is kept for a later export.
+// session. Spans go in batches of at most Batch spans, Concurrency batches
+// at once, built from whole spool files where possible; a file larger than
+// a batch is split. A spool file is removed once every batch holding its
+// spans was sent by every exporter, so a failed export keeps only the files
+// of the failed batches for a later export.
 func (c Config) Export(dir string) error {
 	c.printWarnings(dir)
 	sess, readErr := readSession(dir)
-	spans := sess.spans(time.Now())
-	if len(spans) == 0 {
+	batches := c.batches(sess, time.Now())
+	if len(batches) == 0 {
+		// Only files without spans, such as attribute files of spans no
+		// longer open: nothing to send, so remove them.
+		for _, f := range sess.files {
+			for _, path := range f.paths() {
+				if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+					readErr = errors.Join(readErr, err)
+				}
+			}
+		}
 		if dir != c.SessionDir {
 			os.Remove(dir) // only succeeds when empty
 		}
@@ -237,24 +268,137 @@ func (c Config) Export(dir string) error {
 	if len(c.Exporters) == 0 {
 		return errors.Join(readErr, errors.New("no exporter configured (set OTEL_EXPORTER_OTLP_ENDPOINT or GOCACHED_TRACE_FILE); spans kept in "+dir))
 	}
-	var errs []error
-	for _, e := range c.Exporters {
-		if err := e.Export(spans); err != nil {
-			errs = append(errs, err)
+	errs := c.sendBatches(batches)
+	failed := map[int]bool{}
+	var sendErrs []error
+	for i, err := range errs {
+		if err != nil {
+			sendErrs = append(sendErrs, err)
+			for _, f := range batches[i].files {
+				failed[f] = true
+			}
 		}
 	}
-	if len(errs) > 0 {
-		return errors.Join(readErr, fmt.Errorf("export failed, spans kept in %s: %w", dir, errors.Join(errs...)))
-	}
-	for _, f := range sess.files {
-		if err := os.Remove(f); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			errs = append(errs, err)
+	var rmErrs []error
+	for i, f := range sess.files {
+		if failed[i] {
+			continue
 		}
+		for _, path := range f.paths() {
+			if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				rmErrs = append(rmErrs, err)
+			}
+		}
+	}
+	if len(sendErrs) > 0 {
+		return errors.Join(readErr, fmt.Errorf("export failed, %d of %d batches kept in %s: %w", len(sendErrs), len(batches), dir, errors.Join(sendErrs...)), errors.Join(rmErrs...))
 	}
 	if dir != c.SessionDir {
 		os.Remove(dir) // only succeeds when empty
 	}
-	return errors.Join(readErr, errors.Join(errs...))
+	c.reportExport(batches)
+	return errors.Join(readErr, errors.Join(rmErrs...))
+}
+
+// reportExport prints to Warn, for each trace in the exported batches, how
+// many of its spans were exported and the trace (as a URLTemplate link when
+// set): one line per trace, in the order traces first appear.
+func (c Config) reportExport(batches []batch) {
+	if c.Warn == nil {
+		return
+	}
+	var order []trace.TraceID
+	counts := map[trace.TraceID]int{}
+	for _, b := range batches {
+		for _, s := range b.spans {
+			if counts[s.TraceID] == 0 {
+				order = append(order, s.TraceID)
+			}
+			counts[s.TraceID]++
+		}
+	}
+	for _, tid := range order {
+		id := tid.String()
+		if c.URLTemplate != "" {
+			id = strings.ReplaceAll(c.URLTemplate, "{trace_id}", id)
+		}
+		fmt.Fprintf(c.Warn, "gocached trace: exported %d spans of trace %s\n", counts[tid], id)
+	}
+}
+
+// batch is the spans of one export request and the indexes of the session
+// files they come from.
+type batch struct {
+	spans []Span
+	files []int
+}
+
+// batches packs the session's files into batches of at most c.Batch spans.
+// Whole files are added while they fit; a file larger than a batch is split
+// into batches of its own.
+func (c Config) batches(sess session, now time.Time) []batch {
+	size := c.Batch
+	if size <= 0 {
+		size = DefaultExportBatch
+	}
+	var out []batch
+	var cur batch
+	flush := func() {
+		if len(cur.spans) > 0 {
+			out = append(out, cur)
+		}
+		cur = batch{}
+	}
+	for i, f := range sess.files {
+		spans := f.exportSpans(now)
+		switch {
+		case len(spans) == 0:
+			cur.files = append(cur.files, i)
+		case len(spans) > size:
+			flush()
+			for len(spans) > 0 {
+				n := min(size, len(spans))
+				out = append(out, batch{spans: spans[:n:n], files: []int{i}})
+				spans = spans[n:]
+			}
+		default:
+			if len(cur.spans)+len(spans) > size {
+				flush()
+			}
+			cur.spans = append(cur.spans, spans...)
+			cur.files = append(cur.files, i)
+		}
+	}
+	flush()
+	return out
+}
+
+// sendBatches sends each batch through every exporter, at most
+// c.Concurrency batches at once, and returns each batch's error.
+func (c Config) sendBatches(batches []batch) []error {
+	conc := c.Concurrency
+	if conc <= 0 {
+		conc = DefaultExportConcurrency
+	}
+	errs := make([]error, len(batches))
+	sem := make(chan struct{}, conc)
+	var wg sync.WaitGroup
+	for i, b := range batches {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer func() { <-sem; wg.Done() }()
+			var es []error
+			for _, e := range c.Exporters {
+				if err := e.Export(b.spans); err != nil {
+					es = append(es, err)
+				}
+			}
+			errs[i] = errors.Join(es...)
+		}()
+	}
+	wg.Wait()
+	return errs
 }
 
 // ExportAll exports every session directory under BaseDir.

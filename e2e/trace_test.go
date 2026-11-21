@@ -34,8 +34,8 @@ func TestTraceBeginEndExportToFile(t *testing.T) {
 		t.Fatalf("begin printed %q, stderr %q", tp, stderr)
 	}
 	parent, stderr := gocachedTrace(t, append(base, "TRACEPARENT="+tp), "end", "--export")
-	if parent != "" || stderr != "" {
-		t.Fatalf("end --export printed %q, stderr %q", parent, stderr)
+	if want := "gocached trace: exported 1 spans of trace " + tp[3:35] + "\n"; parent != "" || stderr != want {
+		t.Fatalf("end --export printed %q, stderr %q; want stderr %q", parent, stderr, want)
 	}
 	data, err := os.ReadFile(file)
 	if err != nil {

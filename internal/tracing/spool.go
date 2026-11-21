@@ -110,10 +110,23 @@ func readSpanFile(path string) ([]Span, error) {
 
 // session is what one session directory holds.
 type session struct {
-	files    []string // every spool file read: finished, open and attribute files
-	finished []Span
-	open     []Span
-	attrs    map[trace.SpanID][]Attr // merged attribute files by span ID
+	files []spoolFile // every spool file read: finished, open and attribute files
+}
+
+// spoolFile is one finished or open spool file and its spans. An open
+// file's attrFiles are the attribute files of its span, already merged into
+// its spans; they are kept and removed with it. An attribute file of a span
+// no longer open is a spoolFile of its own with no spans, so it is dropped.
+type spoolFile struct {
+	path      string
+	open      bool
+	spans     []Span
+	attrFiles []string
+}
+
+// paths returns every file the spool file stands for.
+func (f spoolFile) paths() []string {
+	return append([]string{f.path}, f.attrFiles...)
 }
 
 // readSession reads every spool file in dir. A missing dir is an empty
@@ -129,23 +142,27 @@ func readSession(dir string) (session, error) {
 		return s, err
 	}
 	var errs []error
+	attrs := map[trace.SpanID][]Attr{}
+	attrPaths := map[trace.SpanID][]string{}
+	var attrOrder []trace.SpanID
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || strings.HasPrefix(name, ".tmp-") {
 			continue
 		}
+		path := filepath.Join(dir, name)
 		if id, ok := attrFileSpan(name); ok {
-			spans, err := readSpanFile(filepath.Join(dir, name))
+			spans, err := readSpanFile(path)
 			if err != nil {
 				errs = append(errs, err)
 				continue
 			}
-			s.files = append(s.files, filepath.Join(dir, name))
-			if s.attrs == nil {
-				s.attrs = map[trace.SpanID][]Attr{}
+			if _, seen := attrPaths[id]; !seen {
+				attrOrder = append(attrOrder, id)
 			}
+			attrPaths[id] = append(attrPaths[id], path)
 			for _, sp := range spans {
-				s.attrs[id] = MergeAttrs(s.attrs[id], sp.Attrs...)
+				attrs[id] = MergeAttrs(attrs[id], sp.Attrs...)
 			}
 			continue
 		}
@@ -153,32 +170,44 @@ func readSession(dir string) (session, error) {
 		if !isOpen && !strings.HasSuffix(name, finishedSuffix) {
 			continue
 		}
-		path := filepath.Join(dir, name)
 		spans, err := readSpanFile(path)
 		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		s.files = append(s.files, path)
-		if isOpen {
-			s.open = append(s.open, spans...)
-		} else {
-			s.finished = append(s.finished, spans...)
+		s.files = append(s.files, spoolFile{path: path, open: isOpen, spans: spans})
+	}
+	for i := range s.files {
+		f := &s.files[i]
+		if !f.open {
+			continue
+		}
+		for j, sp := range f.spans {
+			f.spans[j].Attrs = MergeAttrs(sp.Attrs, attrs[sp.SpanID]...)
+			f.attrFiles = append(f.attrFiles, attrPaths[sp.SpanID]...)
+			delete(attrPaths, sp.SpanID)
+		}
+	}
+	for _, id := range attrOrder {
+		for _, path := range attrPaths[id] {
+			s.files = append(s.files, spoolFile{path: path})
 		}
 	}
 	return s, errors.Join(errs...)
 }
 
-// spans returns the session's spans for export: finished ones as they are,
-// open ones with their attribute files merged and closed at now with status
-// error. Attribute files of spans no longer open are dropped.
-func (s session) spans(now time.Time) []Span {
-	out := append([]Span(nil), s.finished...)
-	for _, o := range s.open {
-		o.Attrs = MergeAttrs(o.Attrs, s.attrs[o.SpanID]...)
+// exportSpans returns the file's spans for export: finished ones as they
+// are, open ones (with their attribute files merged) closed at now with
+// status error.
+func (f spoolFile) exportSpans(now time.Time) []Span {
+	if !f.open {
+		return f.spans
+	}
+	out := make([]Span, len(f.spans))
+	for i, o := range f.spans {
 		o.End = now
 		o.Status = Status{Code: StatusError, Message: "span still open at export"}
-		out = append(out, o)
+		out[i] = o
 	}
 	return out
 }

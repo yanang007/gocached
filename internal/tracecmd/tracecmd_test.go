@@ -54,11 +54,14 @@ func (s *shell) run(args ...string) (stdout, stderr string) {
 	return strings.TrimSuffix(out.String(), "\n"), errb.String()
 }
 
+// exportReport matches the line an export prints for each session.
+var exportReport = regexp.MustCompile(`(?m)^gocached trace: exported \d+ spans of trace [0-9a-f]{32}\n`)
+
 // export runs `export TRACEPARENT=$(gocached trace args...)`.
 func (s *shell) export(args ...string) string {
 	s.t.Helper()
 	out, stderr := s.run(args...)
-	if stderr != "" {
+	if stderr = exportReport.ReplaceAllString(stderr, ""); stderr != "" {
 		s.t.Errorf("trace %v: unexpected stderr %q", args, stderr)
 	}
 	s.env["TRACEPARENT"] = out
@@ -235,8 +238,9 @@ func TestExportClosesOpenSpansWithStatusError(t *testing.T) {
 	sh := newShell(t, "GOCACHED_TRACE_FILE="+file)
 	sh.export("begin", "-n", "build")
 	sh.export("begin", "-n", "killed")
-	if out, stderr := sh.run("export"); out != "" || stderr != "" {
-		t.Fatalf("export printed %q, stderr %q", out, stderr)
+	want := "gocached trace: exported 2 spans of trace " + sh.env["TRACEPARENT"][3:35] + "\n"
+	if out, stderr := sh.run("export"); out != "" || stderr != want {
+		t.Fatalf("export printed %q, stderr %q; want stderr %q", out, stderr, want)
 	}
 	spans := exported(t, file)
 	if len(spans) != 2 {
@@ -247,7 +251,9 @@ func TestExportClosesOpenSpansWithStatusError(t *testing.T) {
 			t.Errorf("open span %s exported with status %d, want 2 (error)", s.Name, s.StatusCode)
 		}
 	}
-	sh.run("export")
+	if _, stderr := sh.run("export"); stderr != "" {
+		t.Errorf("exporting an empty session printed %q", stderr)
+	}
 	if n := len(exported(t, file)); n != 2 {
 		t.Errorf("second export added spans: %d total", n)
 	}
@@ -262,8 +268,8 @@ func TestExportAllScansEveryBaseDirSession(t *testing.T) {
 		sh.export("end")
 	}
 	sh := newShell(t, "GOCACHED_TRACE_BASE_DIR="+base, "GOCACHED_TRACE_FILE="+file)
-	if _, stderr := sh.run("export", "--all"); stderr != "" {
-		t.Fatalf("export --all: %s", stderr)
+	if _, stderr := sh.run("export", "--all"); len(exportReport.FindAllString(stderr, -1)) != 2 || exportReport.ReplaceAllString(stderr, "") != "" {
+		t.Fatalf("export --all stderr %q, want one report line per session", stderr)
 	}
 	names := map[string]bool{}
 	for _, s := range exported(t, file) {

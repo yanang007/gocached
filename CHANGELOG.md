@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `trace end --exit-code N` sets `process.exit.code` and, when N is not 0, status error, as `trace exec` does; `--status ok|error` sets the status directly and `-m` its message.
 - `gocached trace set -a k=v...` adds attributes to the open span in `TRACEPARENT`. Each call writes its own file, merged when the span ends or is exported, so concurrent calls are safe. Like the other trace commands it warns and exits 0 on runtime errors.
 - `GOCACHED_TRACE_RUSAGE`: when set, toolexec tool spans and `trace exec` spans carry the child process's CPU user and system time (`gocached.cpu.user`, `gocached.cpu.system`, double seconds) and peak memory (`gocached.memory.peak`, int bytes; `Rusage.Maxrss` on Unix, `PeakWorkingSetSize` on Windows). Off by default.
+- Batched trace export: spans are sent in batches of `GOCACHED_TRACE_EXPORT_BATCH` (default 512), `GOCACHED_TRACE_EXPORT_CONCURRENCY` (default 4) at once, built from whole spool files, so a large session no longer hits a collector's body limit. A spool file is removed once all its spans are sent; a failed batch keeps only its files for the next export.
+- `OTEL_EXPORTER_OTLP_TRACES_COMPRESSION` / `OTEL_EXPORTER_OTLP_COMPRESSION`: `gzip` or `none` (default) for OTLP/HTTP export.
+- Each session export prints `gocached trace: exported N spans of trace <trace_id>` on stderr, one line per trace in the session, or the trace URL from `GOCACHED_TRACE_URL_TEMPLATE` (`{trace_id}` is replaced).
 
 ### Changed
 

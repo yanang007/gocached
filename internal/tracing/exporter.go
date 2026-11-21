@@ -2,6 +2,7 @@ package tracing
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -24,13 +25,14 @@ type HTTPExporter struct {
 	Headers map[string]string // extra request headers
 	Timeout time.Duration     // per export; 0 means DefaultHTTPTimeout
 	Client  *http.Client      // nil means http.DefaultClient
+	Gzip    bool              // gzip request bodies (Content-Encoding: gzip)
 }
 
 // HTTPExporterFromEnv builds an HTTPExporter from the standard OTLP
 // exporter variables read through getenv: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
 // (used as is) or OTEL_EXPORTER_OTLP_ENDPOINT (plus /v1/traces), the
 // matching _HEADERS (k=v,... with URL-encoded values) and _TIMEOUT
-// (milliseconds). With no endpoint set it returns nil and no error. A
+// (milliseconds) and _COMPRESSION (gzip or none). With no endpoint set it returns nil and no error. A
 // protocol of grpc is an error: only OTLP/HTTP is supported, and spans are
 // always sent as JSON.
 func HTTPExporterFromEnv(getenv func(string) string) (*HTTPExporter, error) {
@@ -66,6 +68,13 @@ func HTTPExporterFromEnv(getenv func(string) string) (*HTTPExporter, error) {
 			e.Headers[strings.TrimSpace(k)] = dv
 		}
 	}
+	switch c := get("COMPRESSION"); c {
+	case "", "none":
+	case "gzip":
+		e.Gzip = true
+	default:
+		return nil, fmt.Errorf("OTEL_EXPORTER_OTLP_COMPRESSION %q: want gzip or none", c)
+	}
 	if t := get("TIMEOUT"); t != "" {
 		ms, err := strconv.Atoi(t)
 		if err != nil || ms <= 0 {
@@ -79,7 +88,15 @@ func HTTPExporterFromEnv(getenv func(string) string) (*HTTPExporter, error) {
 // Export posts spans in one request. Any status other than 2xx is an error.
 func (e *HTTPExporter) Export(spans []Span) error {
 	var buf bytes.Buffer
-	if err := WriteOTLP(&buf, spans); err != nil {
+	if e.Gzip {
+		zw := gzip.NewWriter(&buf)
+		if err := WriteOTLP(zw, spans); err != nil {
+			return err
+		}
+		if err := zw.Close(); err != nil {
+			return err
+		}
+	} else if err := WriteOTLP(&buf, spans); err != nil {
 		return err
 	}
 	timeout := e.Timeout
@@ -93,6 +110,9 @@ func (e *HTTPExporter) Export(spans []Span) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if e.Gzip {
+		req.Header.Set("Content-Encoding", "gzip")
+	}
 	for k, v := range e.Headers {
 		req.Header.Set(k, v)
 	}
