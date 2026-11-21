@@ -54,7 +54,7 @@ func runHooks(t *testing.T, env []string, ev toolexec.Event, res toolexec.Result
 func attr(s tracing.Span, key string) string {
 	for _, a := range s.Attrs {
 		if a.Key == key {
-			return a.Value
+			return a.Value.String()
 		}
 	}
 	return ""
@@ -96,6 +96,11 @@ func TestCompileSpanIsChildOfTraceparentWithActionID(t *testing.T) {
 	for k, v := range want {
 		if got := attr(s, k); got != v {
 			t.Errorf("attribute %s = %q, want %q", k, got, v)
+		}
+	}
+	for _, a := range s.Attrs {
+		if a.Key == "gocached.exit_code" && a.Value.Type != tracing.IntType {
+			t.Errorf("gocached.exit_code type %v, want int", a.Value.Type)
 		}
 	}
 	if s.Status.Code == tracing.StatusError {

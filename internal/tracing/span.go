@@ -6,6 +6,7 @@ package tracing
 
 import (
 	"crypto/rand"
+	"strconv"
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
@@ -24,8 +25,71 @@ type Span struct {
 	Status       Status
 }
 
-// Attr is a string span attribute.
-type Attr struct{ Key, Value string }
+// Attr is a span attribute.
+type Attr struct {
+	Key   string
+	Value Value
+}
+
+// ValueType is the type of an attribute value.
+type ValueType int
+
+// Attribute value types, as OTLP's AnyValue scalars.
+const (
+	StringType ValueType = iota
+	IntType
+	DoubleType
+	BoolType
+)
+
+// Value is a typed attribute value; the zero Value is the empty string.
+// Build one with String, Int, Double or Bool.
+type Value struct {
+	Type ValueType
+	str  string
+	num  int64
+	dbl  float64
+}
+
+// String returns a string value.
+func String(v string) Value { return Value{Type: StringType, str: v} }
+
+// Int returns an integer value.
+func Int(v int64) Value { return Value{Type: IntType, num: v} }
+
+// Double returns a floating-point value.
+func Double(v float64) Value { return Value{Type: DoubleType, dbl: v} }
+
+// Bool returns a boolean value.
+func Bool(v bool) Value {
+	var n int64
+	if v {
+		n = 1
+	}
+	return Value{Type: BoolType, num: n}
+}
+
+// AsInt returns an integer value's number.
+func (v Value) AsInt() int64 { return v.num }
+
+// AsDouble returns a floating-point value's number.
+func (v Value) AsDouble() float64 { return v.dbl }
+
+// AsBool returns a boolean value's truth.
+func (v Value) AsBool() bool { return v.num != 0 }
+
+// String formats the value as text: a string as is, numbers in decimal.
+func (v Value) String() string {
+	switch v.Type {
+	case IntType:
+		return strconv.FormatInt(v.num, 10)
+	case DoubleType:
+		return strconv.FormatFloat(v.dbl, 'g', -1, 64)
+	case BoolType:
+		return strconv.FormatBool(v.AsBool())
+	}
+	return v.str
+}
 
 // StatusCode is the OTLP span status code.
 type StatusCode int

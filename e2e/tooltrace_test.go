@@ -40,6 +40,7 @@ func readExported(t *testing.T, file string) []exportedSpan {
 							Key   string `json:"key"`
 							Value struct {
 								StringValue string `json:"stringValue"`
+								IntValue    string `json:"intValue"`
 							} `json:"value"`
 						} `json:"attributes"`
 					} `json:"spans"`
@@ -56,7 +57,7 @@ func readExported(t *testing.T, file string) []exportedSpan {
 				for _, s := range ss.Spans {
 					e := exportedSpan{Name: s.Name, TraceID: s.TraceID, ParentSpanID: s.ParentSpanID, Attrs: map[string]string{}}
 					for _, a := range s.Attributes {
-						e.Attrs[a.Key] = a.Value.StringValue
+						e.Attrs[a.Key] = a.Value.StringValue + a.Value.IntValue
 					}
 					out = append(out, e)
 				}

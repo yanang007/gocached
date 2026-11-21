@@ -267,6 +267,8 @@ export TRACEPARENT=$(gocached trace end --export)           # 回到 CI 的 span
 
 已结束的 span 以 OTLP JSON 文件写入追踪会话目录，在导出前一直保留，所以被杀掉的任务的 span 也能事后导出。导出会清空该目录；导出器失败时文件保留。
 
+span 属性在 OTLP JSON 中带有类型。`process.exit.code`、`gocached.exit_code`、`gocached.size`（单位为字节）和 `gocached.batch_size` 是整数（`intValue`，按 OTLP JSON 对 64 位整数的写法为十进制字符串）；其余所有属性，包括来自 `-a` 和 `GOCACHED_TRACE_ATTRS` 的属性，都是字符串（`stringValue`）。
+
 | 变量 | 含义 |
 | ---- | ---- |
 | `OTEL_SERVICE_NAME` | 新 span 的服务名；`-s` 覆盖它。 |

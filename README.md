@@ -267,6 +267,8 @@ export TRACEPARENT=$(gocached trace end --export)           # back to the CI's s
 
 Finished spans are written as OTLP JSON files into a trace session directory and stay there until exported, so spans of a killed job can be exported later. Exporting empties the directory; if the exporter fails, the files are kept.
 
+Span attributes are typed in OTLP JSON. `process.exit.code`, `gocached.exit_code`, `gocached.size` (in bytes) and `gocached.batch_size` are ints (`intValue`, a decimal string as OTLP JSON writes 64-bit integers); every other attribute, including those from `-a` and `GOCACHED_TRACE_ATTRS`, is a string (`stringValue`).
+
 | Variable | Meaning |
 | -------- | ------- |
 | `OTEL_SERVICE_NAME` | Service of new spans; `-s` overrides it. |

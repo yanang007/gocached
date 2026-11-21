@@ -162,7 +162,7 @@ func (s *session) Get(ctx context.Context, actionID []byte) (cacheprog.Entry, er
 	f := s.opts.Chain.Fill(ctx, ids, hit)[0]
 	if f.Path == "" {
 		s.stats.miss.Add(1)
-		s.tr.record(spanGetMiss, start, actionID, tracing.Status{}, tracing.Attr{Key: cacheResultAttr, Value: "miss"})
+		s.tr.record(spanGetMiss, start, actionID, tracing.Status{}, tracing.Attr{Key: cacheResultAttr, Value: tracing.String("miss")})
 		return cacheprog.Entry{}, cacheprog.ErrMiss
 	}
 	h := hit[0]
@@ -174,8 +174,8 @@ func (s *session) Get(ctx context.Context, actionID []byte) (cacheprog.Entry, er
 		from = "remote"
 	}
 	if s.tr != nil {
-		s.tr.record(spanGetHit, start, actionID, tracing.Status{}, tracing.Attr{Key: cacheResultAttr, Value: "hit"},
-			tracing.Attr{Key: backendAttr, Value: from}, sizeAttr(h.Object.Size))
+		s.tr.record(spanGetHit, start, actionID, tracing.Status{}, tracing.Attr{Key: cacheResultAttr, Value: tracing.String("hit")},
+			tracing.Attr{Key: backendAttr, Value: tracing.String(from)}, sizeAttr(h.Object.Size))
 	}
 	return cacheprog.Entry{OutputID: h.Object.OutputID, Size: h.Object.Size, Time: h.Object.Time, DiskPath: f.Path}, nil
 }

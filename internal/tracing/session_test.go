@@ -133,14 +133,14 @@ func TestBeginRestartsStaleOpenSpanFromCrashedRun(t *testing.T) {
 	cfg.Key = "job-42"
 	var warn strings.Builder
 	cfg.Warn = &warn
-	crashed, err := cfg.Begin(trace.SpanContext{}, "build", []tracing.Attr{{Key: "run", Value: "1"}})
+	crashed, err := cfg.Begin(trace.SpanContext{}, "build", []tracing.Attr{{Key: "run", Value: tracing.String("1")}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// The first run dies here, leaving its span open. The rerun begins the
 	// same span again.
 	before := time.Now()
-	rerun, err := cfg.Begin(trace.SpanContext{}, "build", []tracing.Attr{{Key: "run", Value: "2"}})
+	rerun, err := cfg.Begin(trace.SpanContext{}, "build", []tracing.Attr{{Key: "run", Value: tracing.String("2")}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestBeginRestartsStaleOpenSpanFromCrashedRun(t *testing.T) {
 func attrValue(s tracing.Span, key string) string {
 	for _, a := range s.Attrs {
 		if a.Key == key {
-			return a.Value
+			return a.Value.String()
 		}
 	}
 	return ""

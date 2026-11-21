@@ -62,7 +62,7 @@ func ConfigFromEnviron(environ []string, warn io.Writer) (Config, error) {
 		}
 	}
 	if e.NodeTag != "" {
-		c.Attrs = MergeAttrs(c.Attrs, Attr{Key: NodeTagAttr, Value: e.NodeTag})
+		c.Attrs = MergeAttrs(c.Attrs, Attr{Key: NodeTagAttr, Value: String(e.NodeTag)})
 	}
 	if e.File != "" {
 		c.Exporters = append(c.Exporters, FileExporter{Path: e.File})
@@ -83,7 +83,7 @@ func ParseAttr(s string) (Attr, error) {
 	if !ok || k == "" {
 		return Attr{}, fmt.Errorf("attribute %q: want key=value", s)
 	}
-	return Attr{Key: k, Value: v}, nil
+	return Attr{Key: k, Value: String(v)}, nil
 }
 
 // attrs is GOCACHED_TRACE_ATTRS: comma-separated key=value pairs.

@@ -117,6 +117,7 @@ func TestFailuresWarnExitZeroAndKeepTraceparent(t *testing.T) {
 type exportedSpan struct {
 	Service, Name, SpanID, ParentSpanID string
 	Attrs                               map[string]string
+	Types                               map[string]string // OTLP value field per attribute: "string" or "int"
 	StatusCode                          int
 }
 
@@ -143,7 +144,7 @@ func exported(t *testing.T, path string) []exportedSpan {
 						ParentSpanID string `json:"parentSpanId"`
 						Attributes   []struct {
 							Key   string
-							Value struct{ StringValue string }
+							Value struct{ StringValue, IntValue *string }
 						}
 						Status struct{ Code int }
 					}
@@ -163,9 +164,14 @@ func exported(t *testing.T, path string) []exportedSpan {
 			for _, ss := range rs.ScopeSpans {
 				for _, s := range ss.Spans {
 					e := exportedSpan{Service: service, Name: s.Name, SpanID: s.SpanID, ParentSpanID: s.ParentSpanID,
-						Attrs: map[string]string{}, StatusCode: s.Status.Code}
+						Attrs: map[string]string{}, Types: map[string]string{}, StatusCode: s.Status.Code}
 					for _, a := range s.Attributes {
-						e.Attrs[a.Key] = a.Value.StringValue
+						switch {
+						case a.Value.IntValue != nil:
+							e.Attrs[a.Key], e.Types[a.Key] = *a.Value.IntValue, "int"
+						case a.Value.StringValue != nil:
+							e.Attrs[a.Key], e.Types[a.Key] = *a.Value.StringValue, "string"
+						}
 					}
 					spans = append(spans, e)
 				}
@@ -201,6 +207,9 @@ func TestServiceAndAttributesFromEnvAndFlags(t *testing.T) {
 	for k, v := range want {
 		if b.Attrs[k] != v {
 			t.Errorf("build attribute %s = %q, want %q (all: %v)", k, b.Attrs[k], v, b.Attrs)
+		}
+		if b.Types[k] != "string" {
+			t.Errorf("build attribute %s is a %s, want a string", k, b.Types[k])
 		}
 	}
 	if l.Attrs["job"] != "1" || l.ParentSpanID != b.SpanID {

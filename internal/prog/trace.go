@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
 	"sync"
 	"time"
 
@@ -79,7 +78,7 @@ func (t *tracer) record(k spanKind, start time.Time, actionID []byte, status tra
 	s.Start, s.End = start, time.Now()
 	var id [32]byte
 	copy(id[:], actionID)
-	s.Attrs = tracing.MergeAttrs(s.Attrs, append([]tracing.Attr{{Key: tracing.ActionIDAttr, Value: tracing.ActionIDString(id)}}, attrs...)...)
+	s.Attrs = tracing.MergeAttrs(s.Attrs, append([]tracing.Attr{{Key: tracing.ActionIDAttr, Value: tracing.String(tracing.ActionIDString(id))}}, attrs...)...)
 	s.Status = status
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -104,19 +103,19 @@ func (t *tracer) recordUpload(start time.Time, st chain.Stored, batchLen int, er
 		result, status = "failed", tracing.Status{Code: tracing.StatusError, Message: err.Error()}
 	}
 	t.record(spanUpload, start, st.ActionID, status, kindAttr(st.Object.Kind), sizeAttr(st.Object.Size), uploadAttr(result),
-		tracing.Attr{Key: batchSizeAttr, Value: strconv.Itoa(batchLen)})
+		tracing.Attr{Key: batchSizeAttr, Value: tracing.Int(int64(batchLen))})
 }
 
 func kindAttr(k kind.Kind) tracing.Attr {
-	return tracing.Attr{Key: kindAttrKey, Value: string(k)}
+	return tracing.Attr{Key: kindAttrKey, Value: tracing.String(string(k))}
 }
 
 func uploadAttr(result string) tracing.Attr {
-	return tracing.Attr{Key: uploadAttrKey, Value: result}
+	return tracing.Attr{Key: uploadAttrKey, Value: tracing.String(result)}
 }
 
 func sizeAttr(n int64) tracing.Attr {
-	return tracing.Attr{Key: sizeAttrKey, Value: strconv.FormatInt(n, 10)}
+	return tracing.Attr{Key: sizeAttrKey, Value: tracing.Int(n)}
 }
 
 // flush ends the session span and spools it with every child span. Failures

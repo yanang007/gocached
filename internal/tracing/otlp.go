@@ -55,8 +55,47 @@ type otlpKeyValue struct {
 	Value otlpValue `json:"value"`
 }
 
+// otlpValue is an OTLP JSON AnyValue scalar: exactly one field is set.
+// intValue is a decimal string, as OTLP JSON writes 64-bit integers.
 type otlpValue struct {
-	StringValue string `json:"stringValue"`
+	StringValue *string  `json:"stringValue,omitempty"`
+	IntValue    *string  `json:"intValue,omitempty"`
+	DoubleValue *float64 `json:"doubleValue,omitempty"`
+	BoolValue   *bool    `json:"boolValue,omitempty"`
+}
+
+func toOTLPValue(v Value) otlpValue {
+	switch v.Type {
+	case IntType:
+		s := v.String()
+		return otlpValue{IntValue: &s}
+	case DoubleType:
+		d := v.AsDouble()
+		return otlpValue{DoubleValue: &d}
+	case BoolType:
+		b := v.AsBool()
+		return otlpValue{BoolValue: &b}
+	}
+	s := v.String()
+	return otlpValue{StringValue: &s}
+}
+
+func fromOTLPValue(key string, o otlpValue) (Value, error) {
+	switch {
+	case o.IntValue != nil:
+		n, err := strconv.ParseInt(*o.IntValue, 10, 64)
+		if err != nil {
+			return Value{}, fmt.Errorf("attribute %s: intValue %q: %w", key, *o.IntValue, err)
+		}
+		return Int(n), nil
+	case o.DoubleValue != nil:
+		return Double(*o.DoubleValue), nil
+	case o.BoolValue != nil:
+		return Bool(*o.BoolValue), nil
+	case o.StringValue != nil:
+		return String(*o.StringValue), nil
+	}
+	return String(""), nil
 }
 
 type otlpStatus struct {
@@ -82,7 +121,7 @@ func WriteOTLP(w io.Writer, spans []Span) error {
 			byService[s.Service] = i
 			var res otlpResource
 			if s.Service != "" {
-				res.Attributes = []otlpKeyValue{{Key: serviceNameKey, Value: otlpValue{s.Service}}}
+				res.Attributes = []otlpKeyValue{{Key: serviceNameKey, Value: toOTLPValue(String(s.Service))}}
 			}
 			req.ResourceSpans = append(req.ResourceSpans, otlpResourceSpans{
 				Resource:   res,
@@ -105,8 +144,8 @@ func ReadOTLP(r io.Reader) ([]Span, error) {
 	for _, rs := range req.ResourceSpans {
 		service := ""
 		for _, a := range rs.Resource.Attributes {
-			if a.Key == serviceNameKey {
-				service = a.Value.StringValue
+			if a.Key == serviceNameKey && a.Value.StringValue != nil {
+				service = *a.Value.StringValue
 			}
 		}
 		for _, ss := range rs.ScopeSpans {
@@ -138,7 +177,7 @@ func toOTLP(s Span) otlpSpan {
 		o.ParentSpanID = s.ParentSpanID.String()
 	}
 	for _, a := range s.Attrs {
-		o.Attributes = append(o.Attributes, otlpKeyValue{Key: a.Key, Value: otlpValue{a.Value}})
+		o.Attributes = append(o.Attributes, otlpKeyValue{Key: a.Key, Value: toOTLPValue(a.Value)})
 	}
 	return o
 }
@@ -166,7 +205,11 @@ func fromOTLP(o otlpSpan) (Span, error) {
 	s.TraceState, s.Name = o.TraceState, o.Name
 	s.Status = Status{Code: StatusCode(o.Status.Code), Message: o.Status.Message}
 	for _, a := range o.Attributes {
-		s.Attrs = append(s.Attrs, Attr{Key: a.Key, Value: a.Value.StringValue})
+		v, err := fromOTLPValue(a.Key, a.Value)
+		if err != nil {
+			return s, err
+		}
+		s.Attrs = append(s.Attrs, Attr{Key: a.Key, Value: v})
 	}
 	return s, nil
 }

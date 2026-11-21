@@ -4,7 +4,6 @@ package tooltrace
 
 import (
 	"io"
-	"strconv"
 	"strings"
 
 	"github.com/yanang007/gocached/internal/toolexec"
@@ -75,16 +74,16 @@ func (h spanHook) After(ev toolexec.Event, res toolexec.Result) error {
 	}
 	s := cfg.NewSpan(parent, SpanName(ev))
 	s.Start, s.End = res.Start, res.End
-	attrs := []tracing.Attr{{Key: tracing.ToolAttr, Value: ev.Tool}}
+	attrs := []tracing.Attr{{Key: tracing.ToolAttr, Value: tracing.String(ev.Tool)}}
 	add := func(key, value string) {
 		if value != "" {
-			attrs = append(attrs, tracing.Attr{Key: key, Value: value})
+			attrs = append(attrs, tracing.Attr{Key: key, Value: tracing.String(value)})
 		}
 	}
 	add(tracing.PackageAttr, ev.ImportPath)
 	add(tracing.ActionIDAttr, ev.ActionID)
 	add(tracing.OutputAttr, strings.Join(ev.Outputs, " "))
-	add(tracing.ToolExitCodeAttr, strconv.Itoa(res.ExitCode))
+	attrs = append(attrs, tracing.Attr{Key: tracing.ToolExitCodeAttr, Value: tracing.Int(int64(res.ExitCode))})
 	s.Attrs = tracing.MergeAttrs(s.Attrs, attrs...)
 	s.Status = tracing.ExitStatus(res.ExitCode, res.Err)
 	return cfg.Record(s)

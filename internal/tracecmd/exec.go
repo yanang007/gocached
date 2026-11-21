@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"strconv"
 	"syscall"
 
 	"github.com/yanang007/gocached/internal/tracectx"
@@ -55,7 +54,7 @@ func execCmd(args []string, opts Options) int {
 		return code
 	}
 
-	attrs := []tracing.Attr{{Key: tracing.ExitCodeAttr, Value: strconv.Itoa(code)}}
+	attrs := []tracing.Attr{{Key: tracing.ExitCodeAttr, Value: tracing.Int(int64(code))}}
 	status := tracing.ExitStatus(code, runErr)
 	_, err := closeSpan("exec", environ, attrs, status, func(outermost bool) bool { return outermost }, opts.Stderr)
 	if err != nil {

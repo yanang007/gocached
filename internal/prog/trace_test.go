@@ -104,10 +104,19 @@ func gets(spans []tracing.Span, result string) []tracing.Span {
 	return out
 }
 
+func attrType(s tracing.Span, key string) tracing.ValueType {
+	for _, a := range s.Attrs {
+		if a.Key == key {
+			return a.Value.Type
+		}
+	}
+	return -1
+}
+
 func attr(s tracing.Span, key string) string {
 	for _, a := range s.Attrs {
 		if a.Key == key {
-			return a.Value
+			return a.Value.String()
 		}
 	}
 	return ""
@@ -283,6 +292,9 @@ func TestPutAndUploadSpansCarryKindSizeAndResult(t *testing.T) {
 	if a := byKind["archive"]; attr(a, "gocached.size") != "23" || attr(a, "gocached.action_id") == "" {
 		t.Errorf("archive put span %+v", a)
 	}
+	if typ := attrType(byKind["archive"], "gocached.size"); typ != tracing.IntType {
+		t.Errorf("gocached.size type %v, want int", typ)
+	}
 	if attr(byKind["index"], "gocached.upload") != "skipped" {
 		t.Errorf("index put span should say it is not uploaded, got %+v", byKind["index"])
 	}
@@ -296,5 +308,8 @@ func TestPutAndUploadSpansCarryKindSizeAndResult(t *testing.T) {
 	}
 	if attr(u, "gocached.action_id") != attr(byKind["archive"], "gocached.action_id") {
 		t.Errorf("upload and put spans should share the action ID")
+	}
+	if attr(u, "gocached.batch_size") != "1" || attrType(u, "gocached.batch_size") != tracing.IntType {
+		t.Errorf("upload span batch size %q (type %v), want int 1", attr(u, "gocached.batch_size"), attrType(u, "gocached.batch_size"))
 	}
 }

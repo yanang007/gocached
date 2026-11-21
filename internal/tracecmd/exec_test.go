@@ -117,6 +117,9 @@ func TestExecInsideBeginEndIsAChildAndLeavesExportToEnd(t *testing.T) {
 	if test.StatusCode != 2 || test.Attrs["process.exit.code"] != "5" {
 		t.Errorf("test span status %d, exit code %q; want 2 (error) and 5", test.StatusCode, test.Attrs["process.exit.code"])
 	}
+	if test.Types["process.exit.code"] != "int" {
+		t.Errorf("process.exit.code is a %s, want an int", test.Types["process.exit.code"])
+	}
 }
 
 func TestNestedExecChainsSpansAndOnlyTheOutermostExports(t *testing.T) {

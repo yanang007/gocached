@@ -18,7 +18,7 @@ import (
 func TestFileExporterWritesOneOTLPDocumentAndEmptiesSession(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "trace.json")
 	cfg := tracing.Config{BaseDir: t.TempDir(), Service: "ci", Exporters: []tracing.Exporter{tracing.FileExporter{Path: out}}}
-	outer, err := cfg.Begin(trace.SpanContext{}, "build", []tracing.Attr{{Key: "job", Value: "7"}})
+	outer, err := cfg.Begin(trace.SpanContext{}, "build", []tracing.Attr{{Key: "job", Value: tracing.String("7")}})
 	if err != nil {
 		t.Fatal(err)
 	}

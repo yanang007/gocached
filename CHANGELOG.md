@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- **Breaking:** span attributes are typed. `process.exit.code`, `gocached.exit_code`, `gocached.size` (bytes) and `gocached.batch_size` are now exported as OTLP `intValue` instead of `stringValue`; queries and dashboards that compare them as strings must change. Attributes from `-a` and `GOCACHED_TRACE_ATTRS` stay strings. Spooled spans are read back with their types.
+
 ## [0.5.0] - 2026-11-21
 
 ### Added
