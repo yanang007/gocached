@@ -1,0 +1,42 @@
+ci  (span 696309defbfa65fc, parent -)
+  vcs.ref = local  [stringValue]
+  process.exit.code = 0  [intValue]
+
+build  (span e1ff3c40944477c3, parent 696309defbfa65fc)
+  process.exit.code = 0  [intValue]
+  gocached.cpu.user = 1.53125  [doubleValue]
+  gocached.cpu.system = 27.15625  [doubleValue]
+  gocached.memory.peak = 44122112  [intValue]
+
+staticcheck  (span c4db1e04f88f7e28, parent 696309defbfa65fc)
+  process.exit.code = 0  [intValue]
+  gocached.cpu.user = 9.609375  [doubleValue]
+  gocached.cpu.system = 2.875  [doubleValue]
+  gocached.memory.peak = 416669696  [intValue]
+
+cache get  (span 7f11a547e5121659, parent ff7bc458abefa07c)
+  gocached.action_id = BP-79E5p0CIOg2vrYR2t  [stringValue]
+  gocached.cache.result = miss  [stringValue]
+
+compile github.com/yanang007/gocached/internal/tracing  (span 5d09345433f12bad, parent e1ff3c40944477c3)
+  gocached.tool = compile  [stringValue]
+  gocached.package = github.com/yanang007/gocached/internal/tracing  [stringValue]
+  gocached.action_id = BP-79E5p0CIOg2vrYR2t  [stringValue]
+  gocached.output = C:\Users\yanan\AppData\Local\Temp\go-build3889772821\b254\_pkg_.a  [stringValue]
+  gocached.exit_code = 0  [intValue]
+  gocached.cpu.user = 0.078125  [doubleValue]
+  gocached.cpu.system = 0.0625  [doubleValue]
+  gocached.memory.peak = 67166208  [intValue]
+
+cache put  (span 1e0d7d10c1beaa4f, parent ff7bc458abefa07c)
+  gocached.action_id = BP-79E5p0CIOg2vrYR2t  [stringValue]
+  gocached.kind = archive  [stringValue]
+  gocached.size = 865180  [intValue]
+  gocached.upload = local_only  [stringValue]
+
+cache get  (span e5dc3f5fdf6eb116, parent d098bfc291071550)
+  gocached.action_id = BP-79E5p0CIOg2vrYR2t  [stringValue]
+  gocached.cache.result = hit  [stringValue]
+  gocached.backend = local  [stringValue]
+  gocached.size = 865180  [intValue]
+

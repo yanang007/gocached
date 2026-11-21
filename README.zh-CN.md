@@ -266,6 +266,8 @@ export TRACEPARENT=$(gocached trace end --export)           # 回到 CI 的 span
 gocached trace go -n build -- build ./...    # 写入 gocached-trace.jsonl
 ```
 
+完整的 CI 脚本及真实输出（单任务和多任务）见[示例](docs/zh-CN/examples/README.md)。
+
 | 命令 | 作用 |
 | ---- | ---- |
 | `trace begin [-n name] [-s service] [-k kind] [-a k=v]... [--key K] [--start T] [--no-record]` | 在当前 span 下开启一个子 span（没有当前 span 时开启新的根 span），并打印它的 traceparent。`-k` 设置 span kind：`internal`（默认）、`server`、`client`、`producer` 或 `consumer`。`--key K` 仅对本次 begin 替代 `GOCACHED_TRACE_KEY`（span ID、没有父 span 时的 trace ID 以及会话目录都由 K 派生）。`--start T` 设置开始时间，格式为 RFC 3339 或 Unix 秒。`--no-record` 只打印 traceparent，不写入任何内容。 |

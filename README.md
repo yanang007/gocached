@@ -266,6 +266,8 @@ For a first trace of a build, `gocached trace go` sets everything up:
 gocached trace go -n build -- build ./...    # writes gocached-trace.jsonl
 ```
 
+For complete CI scripts with real output, single-job and multi-job, see the [examples](docs/en/examples/README.md).
+
 | Command | What it does |
 | ------- | ------------ |
 | `trace begin [-n name] [-s service] [-k kind] [-a k=v]... [--key K] [--start T] [--no-record]` | Opens a child of the current span (a new root without one) and prints its traceparent. `-k` sets the span kind: `internal` (default), `server`, `client`, `producer` or `consumer`. `--key K` replaces `GOCACHED_TRACE_KEY` for this begin only (span ID, trace ID without a parent, and session directory come from K). `--start T` sets the start time, RFC 3339 or Unix seconds. `--no-record` only prints the traceparent and writes nothing. |

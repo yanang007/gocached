@@ -4,7 +4,7 @@ Self-hosted Go build cache for intranet CI: a `GOCACHEPROG` client (`gocached pr
 
 ## Conventions
 
-- All documents committed to the repo (specs, tickets, README, ADRs, code comments) are written in English. The one exception is `README.zh-CN.md`, a Chinese translation of `README.md`: keep the two in sync whenever the README changes.
+- All documents committed to the repo (specs, tickets, README, ADRs, code comments) are written in English. The exceptions are the Chinese translations of the user docs: `README.zh-CN.md` translates `README.md`, and `docs/zh-CN/` translates `docs/en/` file by file with the same paths. A change to either side must update the other in the same commit. Internal docs (`docs/adr`, `docs/research`, `docs/agents`) are English only. Generated example outputs live once under `docs/assets/` and are linked from both languages.
 - One commit per ticket. Tickets are GitHub issues; reference the issue as `(#N)` at the end of the subject, e.g. `✨ feat: local-disk GOCACHEPROG client (#2)`, and add a `Closes #N` trailer so pushing to `master` closes it. Commits that span several issues (e.g. review fixes) reference each one with `Refs #N` in the body.
 - Keep history linear: rebase or fast-forward, never merge commits. Branch work (e.g. agent worktrees) is rebased onto the target branch before landing. Before delivery (push/PR), clean the branch up: linearize any merges, and squash follow-up test/docs/fix commits into the ticket commit they belong to, so each ticket is exactly one commit.
 - Commit messages follow [gitmoji](https://gitmoji.dev): `<emoji> <type>: <summary>`, e.g. `✨` new feature, `🐛` bug fix, `✅` tests, `📝` docs, `♻️` refactor, `🔧` config, `👷` CI, `📦` build/release, `🎉` initial commit.

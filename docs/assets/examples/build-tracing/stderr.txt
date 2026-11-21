@@ -1,0 +1,9 @@
+# first run, empty cache
+gocached: get=505 hit_local=0 hit_remote=0 miss=505 put=1053 upload_ok=0 upload_fail=0 skip=0 rejected=0 drain=0ms upload_kinds(skipped/uploaded)=-
+gocached: get=329 hit_local=0 hit_remote=0 miss=329 put=390 upload_ok=0 upload_fail=0 skip=0 rejected=0 drain=0ms upload_kinds(skipped/uploaded)=-
+gocached trace: exported 4221 spans of trace 0d55caf9dcef87e68f8ee04f815f5cc7
+
+# second run, same cache
+gocached: get=779 hit_local=778 hit_remote=0 miss=1 put=1 upload_ok=0 upload_fail=0 skip=0 rejected=0 drain=0ms upload_kinds(skipped/uploaded)=-
+gocached: get=390 hit_local=390 hit_remote=0 miss=0 put=0 upload_ok=0 upload_fail=0 skip=0 rejected=0 drain=0ms upload_kinds(skipped/uploaded)=-
+gocached trace: exported 2486 spans of trace 99838402f58771432449e8cb76999d27

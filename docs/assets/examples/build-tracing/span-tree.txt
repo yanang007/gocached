@@ -1,0 +1,38 @@
+# first run, empty cache (GOCACHED_TRACE_KEY=run-1)
+ci  20.50s
+  build  15.07s
+    gocacheprog  14.47s
+      cache get (miss) x505  (sum 0.04s)
+      cache put x1053  (sum 5.19s)
+    compile <package> x274  (sum 44.60s)
+    asm <package> x84  (sum 3.93s)
+    link github.com/yanang007/gocached  0.42s
+  staticcheck  5.12s
+    gocacheprog  4.86s
+      cache get (miss) x329  (sum 0.03s)
+      cache put x390  (sum 1.87s)
+    gocacheprog  0.01s
+      cache get (hit) x1  (sum 0.00s)
+    gocacheprog  2.39s
+      cache get (hit) x1106  (sum 0.56s)
+      cache get (miss) x182  (sum 0.02s)
+      cache put x235  (sum 0.97s)
+    compile <package> x54  (sum 10.12s)
+
+# second run, same cache (GOCACHED_TRACE_KEY=run-2)
+ci  2.65s
+  build  1.19s
+    gocacheprog  0.95s
+      cache get (hit) x778  (sum 0.26s)
+      cache get (miss) x1  (sum 0.00s)
+      cache put x1  (sum 0.00s)
+    link github.com/yanang007/gocached  0.43s
+  staticcheck  1.14s
+    gocacheprog  0.93s
+      cache get (hit) x390  (sum 0.11s)
+    gocacheprog  0.01s
+      cache get (hit) x1  (sum 0.00s)
+    gocacheprog  0.51s
+      cache get (hit) x1268  (sum 0.47s)
+      cache put x19  (sum 0.01s)
+      cache get (miss) x20  (sum 0.00s)
