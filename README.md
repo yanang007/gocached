@@ -260,11 +260,26 @@ export TRACEPARENT=$(gocached trace end --export)           # back to the CI's s
 
 | Command | What it does |
 | ------- | ------------ |
-| `trace begin [-n name] [-s service] [-k kind] [-a k=v]...` | Opens a child of the current span (a new root without one) and prints its traceparent. `-k` sets the span kind: `internal` (default), `server`, `client`, `producer` or `consumer`. |
+| `trace begin [-n name] [-s service] [-k kind] [-a k=v]... [--key K] [--start T] [--no-record]` | Opens a child of the current span (a new root without one) and prints its traceparent. `-k` sets the span kind: `internal` (default), `server`, `client`, `producer` or `consumer`. `--key K` replaces `GOCACHED_TRACE_KEY` for this begin only (span ID, trace ID without a parent, and session directory come from K). `--start T` sets the start time, RFC 3339 or Unix seconds. `--no-record` only prints the traceparent and writes nothing. |
 | `trace end [-a k=v]... [--exit-code N] [--status ok|error] [-m message] [--export]` | Closes the current span and prints its parent's traceparent, empty at the root. `--exit-code N` sets attribute `process.exit.code` and, when N is not 0, status error, as `trace exec` does; `--status` sets the status directly (overriding `--exit-code`) and `-m` its message. `--export` also exports the session. |
 | `trace set -a k=v...` | Adds attributes to the current span, which must be open (begun by `trace begin` or `trace exec`). Each call writes its own file next to the span, so concurrent calls are safe; the attributes are merged when the span ends or is exported, later calls overriding earlier ones and `trace end -a` overriding both. Prints nothing. |
 | `trace export [--all]` | Exports the current session, or with `--all` every session under the base dir. Spans still open are closed now with status error. |
 | `trace exec [-n name] [-s service] [-k kind] [-a k=v]... -- cmd [args...]` | Runs `cmd` in a child of the current span (`-n` defaults to `cmd`, `-k` as for `begin`) with `TRACEPARENT` set to it, then closes the span with attribute `process.exit.code`, status error if it is not 0. Exports the session when the span is the outermost one, so nested `trace exec` calls and `trace exec` inside `begin`/`end` export once, at the top. Exits with `cmd`'s exit code (127 if it cannot start, 128+n if signal n kills it); interrupt and terminate signals are forwarded to `cmd`, and the span is still closed and exported. |
+
+A pipeline of several jobs becomes one trace when every job derives the pipeline span from the same key, such as the pipeline ID. Each job keeps its own `GOCACHED_TRACE_KEY` (e.g. the job ID), so its spans are children of the pipeline span with their own span IDs:
+
+```sh
+# first job: open the pipeline span
+export TRACEPARENT=$(gocached trace begin -n pipeline --key "$PIPELINE_ID" --start "$PIPELINE_CREATED_AT")
+# other jobs: only compute the same traceparent
+export TRACEPARENT=$(gocached trace begin -n pipeline --key "$PIPELINE_ID" --no-record)
+# every job: its own spans
+GOCACHED_TRACE_KEY=$JOB_ID gocached trace exec -n build -- go build ./...
+# last job: close and export the pipeline span
+GOCACHED_TRACE_KEY=$PIPELINE_ID gocached trace end --export
+```
+
+The span ends in the session directory of `--key`, so the closing job sets `GOCACHED_TRACE_KEY` to the pipeline key and must share that directory with the job that opened it (same machine or `GOCACHED_TRACE_BASE_DIR` on shared storage).
 
 Spans of `begin` and `exec` are `internal` unless `-k` says otherwise; tool and `GOCACHEPROG` spans are always `internal`.
 

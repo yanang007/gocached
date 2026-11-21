@@ -40,7 +40,7 @@ func execCmd(args []string, opts Options) int {
 	}
 
 	environ := opts.Environ
-	tp, beginErr := Begin(opts.Environ, sf, opts.Stderr)
+	tp, beginErr := Begin(opts.Environ, sf, BeginFlags{}, opts.Stderr)
 	if beginErr != nil {
 		warn(opts.Stderr, "exec", beginErr)
 	} else {

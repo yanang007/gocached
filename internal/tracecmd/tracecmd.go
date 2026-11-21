@@ -12,6 +12,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/yanang007/gocached/internal/rusage"
 	"github.com/yanang007/gocached/internal/tracectx"
@@ -25,7 +26,7 @@ type Options struct {
 	Stdout, Stderr io.Writer
 }
 
-const usage = "usage: gocached trace begin [-n name] [-s service] [-k kind] [-a k=v]... | end [-a k=v]... [--exit-code N] [--status ok|error] [-m message] [--export] | set -a k=v... | export [--all] | exec [-n name] [-s service] [-k kind] [-a k=v]... -- cmd [args...]"
+const usage = "usage: gocached trace begin [-n name] [-s service] [-k kind] [-a k=v]... [--key K] [--start T] [--no-record] | end [-a k=v]... [--exit-code N] [--status ok|error] [-m message] [--export] | set -a k=v... | export [--all] | exec [-n name] [-s service] [-k kind] [-a k=v]... -- cmd [args...]"
 
 // Run runs `gocached trace args...` and returns its exit code. A usage
 // error (bad flags, unknown command) is misuse and exits 2. Runtime errors
@@ -100,10 +101,18 @@ func begin(args []string, opts Options) int {
 	fs := newFlagSet("trace begin", opts)
 	var sf SpanFlags
 	sf.Register(fs, "span")
+	var bf BeginFlags
+	fs.StringVar(&bf.Key, "key", "", "derive the span, and without a parent the trace, from `K` instead of $GOCACHED_TRACE_KEY")
+	fs.BoolVar(&bf.NoRecord, "no-record", false, "only print the traceparent; record no span")
+	fs.Func("start", "start `time` of the span: RFC 3339 or Unix seconds (default now)", func(s string) error {
+		t, err := parseStart(s)
+		bf.Start = t
+		return err
+	})
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	tp, err := Begin(opts.Environ, sf, opts.Stderr)
+	tp, err := Begin(opts.Environ, sf, bf, opts.Stderr)
 	fmt.Fprintln(opts.Stdout, tp)
 	if err != nil {
 		warn(opts.Stderr, "begin", err)
@@ -164,10 +173,35 @@ func endStatus(attrs []tracing.Attr, exitCode, status, message string) ([]tracin
 	return attrs, st, nil
 }
 
+// BeginFlags are the flags only `trace begin` has.
+type BeginFlags struct {
+	// Key, if set, replaces GOCACHED_TRACE_KEY for this begin: it derives
+	// the span ID, the trace ID without a parent, and the session dir, so
+	// every job of a pipeline computes the same pipeline span.
+	Key string
+	// NoRecord prints the traceparent without opening a span.
+	NoRecord bool
+	Start    time.Time // start time; zero means now
+}
+
+// parseStart parses --start: RFC 3339, or Unix seconds with an optional
+// fraction.
+func parseStart(s string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t, nil
+	}
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		sec := int64(f)
+		return time.Unix(sec, int64((f-float64(sec))*1e9)), nil
+	}
+	return time.Time{}, fmt.Errorf("start %q: want RFC 3339 or Unix seconds", s)
+}
+
 // Begin opens a child of the span in environ's TRACEPARENT (a root without
-// one) and returns its traceparent. On error it returns environ's
-// TRACEPARENT unchanged, so the caller can always print the result.
-func Begin(environ []string, sf SpanFlags, stderr io.Writer) (string, error) {
+// one), as sf and the `trace begin` flags bf describe, and returns its
+// traceparent. On error it returns environ's TRACEPARENT unchanged, so the
+// caller can always print the result.
+func Begin(environ []string, sf SpanFlags, bf BeginFlags, stderr io.Writer) (string, error) {
 	unchanged := lookup(environ, tracectx.TraceparentEnv)
 	parent, err := tracectx.FromEnviron(environ)
 	if err != nil {
@@ -177,7 +211,15 @@ func Begin(environ []string, sf SpanFlags, stderr io.Writer) (string, error) {
 	if cfgErr != nil {
 		warn(stderr, "begin", cfgErr)
 	}
-	sc, err := sf.Apply(cfg).Begin(parent, sf.Name, sf.Attrs)
+	cfg = sf.Apply(cfg)
+	if bf.Key != "" {
+		cfg.Key = bf.Key
+	}
+	cfg.Start = bf.Start
+	if bf.NoRecord {
+		return tracectx.Traceparent(cfg.Derive(parent)), nil
+	}
+	sc, err := cfg.Begin(parent, sf.Name, sf.Attrs)
 	if err != nil {
 		return unchanged, err
 	}

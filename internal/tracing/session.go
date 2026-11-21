@@ -33,10 +33,12 @@ type Config struct {
 	BaseDir    string // GOCACHED_TRACE_BASE_DIR, default DefaultBaseDir()
 	// Key (GOCACHED_TRACE_KEY) derives the outermost span ID, the trace ID
 	// when there is no parent, and the session directory name.
-	Key       string
-	Service   string   // service.name of new spans
-	Attrs     []Attr   // attributes of new spans
-	Kind      SpanKind // kind of spans opened by Begin; zero is internal
+	Key     string
+	Service string   // service.name of new spans
+	Attrs   []Attr   // attributes of new spans
+	Kind    SpanKind // kind of spans opened by Begin; zero is internal
+	// Start, if set, is the start time of spans opened by Begin instead of now.
+	Start     time.Time
 	Exporters []Exporter
 	// Batch (GOCACHED_TRACE_EXPORT_BATCH) is the most spans sent in one
 	// export request; 0 means DefaultExportBatch.
@@ -140,20 +142,7 @@ func (c Config) isOpen(sc trace.SpanContext) bool {
 // invalid, or not a span open in this session) gets its span ID, and
 // without a parent its trace ID too, from Key when Key is set.
 func (c Config) Begin(parent trace.SpanContext, name string, attrs []Attr) (trace.SpanContext, error) {
-	outermost := !c.isOpen(parent)
-	s := c.NewSpan(parent, name)
-	s.Kind = c.Kind
-	s.Attrs = MergeAttrs(s.Attrs, attrs...)
-	if outermost && c.Key != "" {
-		s.SpanID = keySpanID(c.Key)
-		if !parent.IsValid() {
-			s.TraceID = keyTraceID(c.Key)
-		}
-	}
-	flags := trace.FlagsSampled
-	if parent.IsValid() {
-		flags = parent.TraceFlags()
-	}
+	s, flags, outermost := c.beginSpan(parent, name, attrs)
 	dir := c.SessionDirFor(s.TraceID)
 	if outermost && c.SessionDir != "" && c.Warn != nil {
 		if entries, err := os.ReadDir(dir); err == nil && len(entries) > 0 {
@@ -171,6 +160,37 @@ func (c Config) Begin(parent trace.SpanContext, name string, attrs []Attr) (trac
 		return trace.SpanContext{}, err
 	}
 	return Context(s, flags), nil
+}
+
+// Derive returns the context Begin would return for parent, without
+// recording a span: with Key set and parent not open in this session, the
+// same context every time.
+func (c Config) Derive(parent trace.SpanContext) trace.SpanContext {
+	s, flags, _ := c.beginSpan(parent, "", nil)
+	return Context(s, flags)
+}
+
+// beginSpan builds the span Begin opens and its trace flags, and reports
+// whether it is the outermost span of its session.
+func (c Config) beginSpan(parent trace.SpanContext, name string, attrs []Attr) (s Span, flags trace.TraceFlags, outermost bool) {
+	outermost = !c.isOpen(parent)
+	s = c.NewSpan(parent, name)
+	s.Kind = c.Kind
+	if !c.Start.IsZero() {
+		s.Start = c.Start
+	}
+	s.Attrs = MergeAttrs(s.Attrs, attrs...)
+	if outermost && c.Key != "" {
+		s.SpanID = keySpanID(c.Key)
+		if !parent.IsValid() {
+			s.TraceID = keyTraceID(c.Key)
+		}
+	}
+	flags = trace.FlagsSampled
+	if parent.IsValid() {
+		flags = parent.TraceFlags()
+	}
+	return s, flags, outermost
 }
 
 // End closes the open span cur, adding the attributes of Set and then attrs, spools it as finished

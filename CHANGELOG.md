@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Batched trace export: spans are sent in batches of `GOCACHED_TRACE_EXPORT_BATCH` (default 512), `GOCACHED_TRACE_EXPORT_CONCURRENCY` (default 4) at once, built from whole spool files, so a large session no longer hits a collector's body limit. A spool file is removed once all its spans are sent; a failed batch keeps only its files for the next export.
 - `OTEL_EXPORTER_OTLP_TRACES_COMPRESSION` / `OTEL_EXPORTER_OTLP_COMPRESSION`: `gzip` or `none` (default) for OTLP/HTTP export.
 - Each session export prints `gocached trace: exported N spans of trace <trace_id>` on stderr, one line per trace in the session, or the trace URL from `GOCACHED_TRACE_URL_TEMPLATE` (`{trace_id}` is replaced).
+- `trace begin --key K` derives the span (its span ID, the trace ID without a parent, and the session directory) from K instead of `GOCACHED_TRACE_KEY`, so every job of a pipeline computes the same pipeline traceparent from, say, the pipeline ID; each job's own spans keep its own `GOCACHED_TRACE_KEY` and become children of the pipeline span. `--no-record` only prints the traceparent, for jobs that do not close the pipeline span. `--start T` sets the start time, RFC 3339 or Unix seconds.
 
 ### Changed
 
