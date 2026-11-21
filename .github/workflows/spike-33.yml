@@ -1,0 +1,27 @@
+name: spike-33
+
+on:
+  push:
+    branches: ["spike/33-startup"]
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: Get-MpComputerStatus | Select RealTimeProtectionEnabled,AMRunningMode,AntivirusEnabled | Format-List
+      - run: go mod download
+      - run: bash spike/33/bench.sh
+        shell: bash
