@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-11-21
+
 ### Added
 
 - `trace exec --preset name[,name]` (repeatable) and its shorthand `--go` put a preset in the command's environment, so the go commands of any command (sh, make, ...) inherit it. The `go` preset sets what `trace go` set.
@@ -107,6 +109,7 @@ Configuration changes break compatibility with v0.1.0.
 
 - Initial release: `gocached prog` GOCACHEPROG client and `gocached serve` HTTP cache server.
 
+[0.6.2]: https://github.com/yanang007/gocached/compare/v0.6.1...v0.6.2
 [0.6.0]: https://github.com/yanang007/gocached/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/yanang007/gocached/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/yanang007/gocached/compare/v0.3.1...v0.4.0
