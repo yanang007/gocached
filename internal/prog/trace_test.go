@@ -1,17 +1,23 @@
 package prog_test
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/yanang007/gocached/backend"
 	"github.com/yanang007/gocached/backend/gocache"
+	"github.com/yanang007/gocached/internal/bundler"
 	"github.com/yanang007/gocached/internal/kind"
 	"github.com/yanang007/gocached/internal/prog"
 	"github.com/yanang007/gocached/internal/tracectx"
@@ -303,13 +309,157 @@ func TestPutAndUploadSpansCarryKindSizeAndResult(t *testing.T) {
 		t.Fatalf("want one upload span, got %v", spans)
 	}
 	u := ups[0]
-	if attr(u, "gocached.upload") != "failed" || u.Status.Code != tracing.StatusError || attr(u, "gocached.kind") != "archive" {
+	if attr(u, "gocached.failed") != "1" || u.Status.Code != tracing.StatusError {
 		t.Errorf("upload span should record the failure, got %+v", u)
-	}
-	if attr(u, "gocached.action_id") != attr(byKind["archive"], "gocached.action_id") {
-		t.Errorf("upload and put spans should share the action ID")
 	}
 	if attr(u, "gocached.batch_size") != "1" || attrType(u, "gocached.batch_size") != tracing.IntType {
 		t.Errorf("upload span batch size %q (type %v), want int 1", attr(u, "gocached.batch_size"), attrType(u, "gocached.batch_size"))
+	}
+	if len(u.Events) != 1 {
+		t.Fatalf("want one event for the failed object, got %+v", u.Events)
+	}
+	ev := tracing.Span{Attrs: u.Events[0].Attrs}
+	if attr(ev, "gocached.action_id") != attr(byKind["archive"], "gocached.action_id") || attr(ev, "exception.message") != "server unavailable" {
+		t.Errorf("failure event should name the put's action ID and the error, got %+v", u.Events[0])
+	}
+}
+
+func TestSkippedPutSpansAreNotLinked(t *testing.T) {
+	opts, dir := traced(t, prog.Options{Chain: newChain(t, &kindRemote{})}, "cache.put")
+	s := start(t, opts)
+	s.put("!<arch>\nobject")
+	s.read()
+	s.close()
+
+	ups := named(spooled(t, dir), "cache upload")
+	if len(ups) != 1 || attr(ups[0], "gocached.uploaded") != "1" {
+		t.Fatalf("want one upload span of one object, got %v", ups)
+	}
+	if len(ups[0].Links) != 0 {
+		t.Errorf("upload span links to unrecorded put spans: %+v", ups[0].Links)
+	}
+}
+
+func TestUploadSpanPerBatchLinksPutSpans(t *testing.T) {
+	refuse, _ := kind.Parse("index")
+	opts, dir := traced(t, prog.Options{Chain: newChain(t, &kindRemote{refuse: refuse}), Upload: bundler.Options{MaxDelay: time.Hour}})
+	s := start(t, opts)
+	s.put("!<arch>\none")
+	s.read()
+	s.put("!<arch>\ntwo")
+	s.read()
+	s.put(indexBody) // refused by the server
+	s.read()
+	s.close()
+
+	spans := spooled(t, dir)
+	ups := named(spans, "cache upload")
+	if len(ups) != 1 {
+		t.Fatalf("want one upload span for the one batch, got %v", ups)
+	}
+	u := ups[0]
+	for key, want := range map[string]string{"gocached.batch_size": "3", "gocached.uploaded": "2", "gocached.skipped": "1", "gocached.failed": "0"} {
+		if attr(u, key) != want || attrType(u, key) != tracing.IntType {
+			t.Errorf("%s = %q (type %v), want int %s", key, attr(u, key), attrType(u, key), want)
+		}
+	}
+	if u.Status.Code == tracing.StatusError || len(u.Events) != 0 {
+		t.Errorf("a batch without failures should have no error and no events, got %+v", u)
+	}
+	var putIDs, linked []string
+	for _, p := range named(spans, "cache put") {
+		putIDs = append(putIDs, p.SpanID.String())
+	}
+	for _, l := range u.Links {
+		if l.TraceID != u.TraceID {
+			t.Errorf("link %+v leaves the trace %s", l, u.TraceID)
+		}
+		linked = append(linked, l.SpanID.String())
+	}
+	slices.Sort(putIDs)
+	slices.Sort(linked)
+	if len(putIDs) != 3 || !slices.Equal(linked, putIDs) {
+		t.Errorf("upload links %v, want the put spans %v", linked, putIDs)
+	}
+}
+
+// gatedRefuser refuses every put of a kind in refuse, like kindRemote,
+// but its first put waits until release is closed, so later batches queue
+// up behind it.
+type gatedRefuser struct {
+	refuse  kind.Set
+	release chan struct{}
+	started chan struct{}
+	once    sync.Once
+}
+
+func (r *gatedRefuser) Get(_ context.Context, ids [][]byte) ([]backend.GetResult, error) {
+	res := make([]backend.GetResult, len(ids))
+	for i := range res {
+		res[i].Err = backend.ErrMiss
+	}
+	return res, nil
+}
+
+func (r *gatedRefuser) Put(_ context.Context, items []backend.PutItem) ([]error, error) {
+	r.once.Do(func() {
+		close(r.started)
+		<-r.release
+	})
+	errs := make([]error, len(items))
+	for i, it := range items {
+		if body, err := it.Open(); err == nil {
+			io.Copy(io.Discard, body)
+			body.Close()
+		}
+		if r.refuse.Has(it.Object.Kind) {
+			errs[i] = &backend.RejectedError{Kind: it.Object.Kind}
+		}
+	}
+	return errs, nil
+}
+
+func TestBatchDroppedWhileQueuedStillRecordsUploadSpan(t *testing.T) {
+	refuse, _ := kind.Parse("index")
+	remote := &gatedRefuser{refuse: refuse, release: make(chan struct{}), started: make(chan struct{})}
+	opts, dir := traced(t, prog.Options{Chain: newChain(t, remote), Upload: bundler.Options{MaxItems: 1, Concurrency: 1, MaxDelay: time.Hour}})
+	s := start(t, opts)
+	s.put(indexBody) // its upload blocks, then is refused
+	s.read()
+	<-remote.started
+	s.put(indexBody + "x") // queued behind it, dropped once the kind is refused
+	s.read()
+	close(remote.release)
+	stats := s.close()
+	if stats["skip"] != "2" || stats["rejected"] != "1" {
+		t.Fatalf("stats %v", stats)
+	}
+
+	spans := spooled(t, dir)
+	ups := named(spans, "cache upload")
+	if len(ups) != 2 {
+		t.Fatalf("want an upload span per batch, got %v", ups)
+	}
+	var dropped tracing.Span
+	for _, u := range ups {
+		if len(u.Links) == 1 && attr(u, "gocached.skipped") == "1" {
+			dropped = u
+		}
+	}
+	for key, want := range map[string]string{"gocached.batch_size": "1", "gocached.uploaded": "0", "gocached.skipped": "1", "gocached.failed": "0"} {
+		if attr(dropped, key) != want {
+			t.Errorf("%s = %q, want %s (spans %+v)", key, attr(dropped, key), want, ups)
+		}
+	}
+	linked := map[string]bool{}
+	for _, u := range ups {
+		for _, l := range u.Links {
+			linked[l.SpanID.String()] = true
+		}
+	}
+	for _, p := range named(spans, "cache put") {
+		if !linked[p.SpanID.String()] {
+			t.Errorf("put span %s is linked from no upload span", p.SpanID)
+		}
 	}
 }

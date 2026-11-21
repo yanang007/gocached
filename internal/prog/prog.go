@@ -113,7 +113,7 @@ func Run(ctx context.Context, in io.Reader, out, errOut io.Writer, opts Options)
 		opts.UploadTimeout = DefaultUploadTimeout
 	}
 	s := &session{opts: opts, errOut: errOut, tr: newTracer(opts.Trace, opts.TraceParent)}
-	s.uploads = bundler.New(withDefaults(opts.Upload), func(st chain.Stored) int64 { return st.Object.Size }, s.uploadBatch)
+	s.uploads = bundler.New(withDefaults(opts.Upload), func(q queued) int64 { return q.Object.Size }, s.uploadBatch)
 	defer func() {
 		// Stops uploads left over when Serve failed; a no-op after drain.
 		ctx, cancel := context.WithCancel(context.Background())
@@ -137,7 +137,7 @@ type session struct {
 
 	errOut  io.Writer
 	tr      *tracer // nil when not tracing
-	uploads *bundler.Bundler[chain.Stored]
+	uploads *bundler.Bundler[queued]
 
 	// upMu guards the upload bookkeeping, so that uploads finishing after
 	// a drain timeout no longer change the counters already reported.
@@ -183,12 +183,13 @@ func (s *session) Get(ctx context.Context, actionID []byte) (cacheprog.Entry, er
 func (s *session) Put(ctx context.Context, actionID, outputID []byte, size int64, body io.Reader) (string, error) {
 	s.stats.put.Add(1)
 	start := s.tr.now()
+	putSpan := s.tr.newPutSpanID()
 	obj := backend.Object{OutputID: outputID, Size: size}
 	head := kind.NewHead(size)
 	path, err := s.opts.Chain.PutLocal(ctx, actionID, obj, io.TeeReader(body, head))
 	if err != nil {
 		if s.tr != nil {
-			s.tr.record(spanPut, start, actionID, tracing.Status{Code: tracing.StatusError, Message: err.Error()}, sizeAttr(size))
+			s.tr.recordID(spanPut, putSpan, start, actionID, tracing.Status{Code: tracing.StatusError, Message: err.Error()}, sizeAttr(size))
 		}
 		return "", err
 	}
@@ -203,10 +204,10 @@ func (s *session) Put(ctx context.Context, actionID, outputID []byte, size int64
 		s.stats.kindSkip[i].Add(1)
 		result = "skipped"
 	default:
-		s.upload(ctx, chain.Stored{ActionID: actionID, Object: obj, Path: path})
+		s.upload(ctx, queued{Stored: chain.Stored{ActionID: actionID, Object: obj, Path: path}, putSpan: putSpan})
 	}
 	if s.tr != nil {
-		s.tr.record(spanPut, start, actionID, tracing.Status{}, kindAttr(obj.Kind), sizeAttr(size), uploadAttr(result))
+		s.tr.recordID(spanPut, putSpan, start, actionID, tracing.Status{}, kindAttr(obj.Kind), sizeAttr(size), uploadAttr(result))
 	}
 	return path, nil
 }
@@ -231,43 +232,55 @@ func (s *session) Close(context.Context) error {
 	return nil
 }
 
+// queued is an object in the upload queue with the span ID of the put that
+// stored it, invalid when that put span is not recorded.
+type queued struct {
+	chain.Stored
+	putSpan trace.SpanID
+}
+
 // upload queues a locally stored object for the remaining backends. It
 // blocks only while the upload buffer is full. Failures are counted and
 // logged once; they never fail the put.
-func (s *session) upload(ctx context.Context, st chain.Stored) {
+func (s *session) upload(ctx context.Context, q queued) {
 	if s.opts.Chain.Len() < 2 {
 		return
 	}
 	s.upMu.Lock()
 	s.pending++
 	s.upMu.Unlock()
-	if err := s.uploads.Add(ctx, st); err != nil {
-		s.finishUpload(st.ActionID, st.Object.Kind, err)
+	if err := s.uploads.Add(ctx, q); err != nil {
+		s.finishUpload(q.ActionID, q.Object.Kind, err)
 	}
 }
 
-// uploadBatch uploads one batch from the bundler and records each item.
-func (s *session) uploadBatch(ctx context.Context, batch []chain.Stored) {
+// uploadBatch uploads one batch from the bundler, records each item and
+// records one upload span for the request.
+func (s *session) uploadBatch(ctx context.Context, batch []queued) {
 	// A backend may have refused a kind while this batch waited; those
 	// items are skipped instead of sent.
-	send := batch[:0:0]
-	for _, st := range batch {
-		if s.skips(st.Object.Kind) {
-			s.finishSkip(st.Object.Kind)
+	var send, dropped []queued
+	var stored []chain.Stored
+	for _, q := range batch {
+		if s.skips(q.Object.Kind) {
+			s.finishSkip(q.Object.Kind)
+			dropped = append(dropped, q)
 			continue
 		}
-		send = append(send, st)
+		send = append(send, q)
+		stored = append(stored, q.Stored)
 	}
-	if len(send) == 0 {
-		return
-	}
-	ctx, cancel := context.WithTimeout(ctx, s.opts.UploadTimeout)
-	defer cancel()
 	start := s.tr.now()
-	for i, err := range s.opts.Chain.Upload(ctx, send) {
-		s.finishUpload(send[i].ActionID, send[i].Object.Kind, err)
-		s.tr.recordUpload(start, send[i], len(send), err)
+	var errs []error
+	if len(send) > 0 {
+		ctx, cancel := context.WithTimeout(ctx, s.opts.UploadTimeout)
+		defer cancel()
+		errs = s.opts.Chain.Upload(ctx, stored)
+		for i, err := range errs {
+			s.finishUpload(send[i].ActionID, send[i].Object.Kind, err)
+		}
 	}
+	s.tr.recordUpload(start, send, errs, dropped)
 }
 
 // finishSkip records a queued upload dropped because its kind was refused.

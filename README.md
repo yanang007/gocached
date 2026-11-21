@@ -309,9 +309,11 @@ With `GOCACHED_TRACE` set (any non-empty value) and a `TRACEPARENT` in the envir
 | `gocacheprog` | `cache.session` | none |
 | `cache get` | `cache.get.hit`, `cache.get.miss` | `gocached.cache.result` (`hit` or `miss`); on a hit also `gocached.backend` (`local` or `remote`) and `gocached.size` |
 | `cache put` | `cache.put` | `gocached.kind`, `gocached.size`, `gocached.upload` (`queued`, `skipped` by `GOCACHED_SKIP_KINDS` or an earlier refusal, or `local_only` without a server) |
-| `cache upload` | `cache.upload` | `gocached.kind`, `gocached.size`, `gocached.upload` (`uploaded`, `skipped` when the server refused the kind, `failed` with status error), `gocached.batch_size` |
+| `cache upload` | `cache.upload` | One span per upload batch: `gocached.batch_size` and the counts `gocached.uploaded`, `gocached.skipped` (the server refused the kind, in this request or while the object was queued) and `gocached.failed` (status error when not 0) |
 
-Every span but `gocacheprog` carries `gocached.action_id`, the 20-character form go uses as the first part of a compile's `-buildid`, so a miss and the compile that follows it share it. `GOCACHED_TRACE_SKIP` takes a comma-separated list of skip keys not to record, e.g. `GOCACHED_TRACE_SKIP=cache.get.hit,cache.upload`; by default all are recorded. go does not cache prog's stderr, so a tracing failure is a warning there: prog's answers to go and its stats line do not change.
+A `cache upload` span has a span link to the `cache put` span of each object in its batch, so a backend can show which puts a request carried. Objects whose kind the server refused while they were queued are not sent but still count in the batch, as skipped; a batch of only such objects has its span too, without a request. With `cache.put` skipped it has no links. Each failed object is an `upload failed` span event with its `gocached.action_id`, `gocached.kind`, `gocached.size` and `exception.message`.
+
+Every span but `gocacheprog` and `cache upload` carries `gocached.action_id`, the 20-character form go uses as the first part of a compile's `-buildid`, so a miss and the compile that follows it share it. `GOCACHED_TRACE_SKIP` takes a comma-separated list of skip keys not to record, e.g. `GOCACHED_TRACE_SKIP=cache.get.hit,cache.upload`; by default all are recorded. go does not cache prog's stderr, so a tracing failure is a warning there: prog's answers to go and its stats line do not change.
 
 ## Entry kinds
 

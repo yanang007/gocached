@@ -24,7 +24,23 @@ type Span struct {
 	Start, End   time.Time
 	Kind         SpanKind // the zero value is exported as internal
 	Attrs        []Attr
+	Links        []Link  // OTLP span links, e.g. to the spans of batched work
+	Events       []Event // OTLP span events
 	Status       Status
+}
+
+// Link points from a span to another span, in the same trace or not.
+type Link struct {
+	TraceID trace.TraceID
+	SpanID  trace.SpanID
+	Attrs   []Attr
+}
+
+// Event is a named, timestamped point in a span.
+type Event struct {
+	Time  time.Time
+	Name  string
+	Attrs []Attr
 }
 
 // Attr is a span attribute.

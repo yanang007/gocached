@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Breaking:** span attributes are typed. `process.exit.code`, `gocached.exit_code`, `gocached.size` (bytes) and `gocached.batch_size` are now exported as OTLP `intValue` instead of `stringValue`; queries and dashboards that compare them as strings must change. Attributes from `-a` and `GOCACHED_TRACE_ATTRS` stay strings. Spooled spans are read back with their types.
+- **Breaking:** `cache upload` is one span per upload request instead of one per object, with a span link (OTLP `links`) to the `cache put` span of each object in the batch (none when `cache.put` is skipped). Objects dropped because their kind was refused while queued count in `gocached.batch_size` and `gocached.skipped`; a batch of only such objects still has its span. Its attributes are `gocached.batch_size` and the int counts `gocached.uploaded`, `gocached.skipped` and `gocached.failed`; it no longer has `gocached.action_id`, `gocached.kind`, `gocached.size` or `gocached.upload`. Each failed object is an `upload failed` span event (OTLP `events`) with its action ID, kind, size and `exception.message`. Links and events round trip through the spool.
 
 ## [0.5.0] - 2026-11-21
 

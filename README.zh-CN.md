@@ -309,9 +309,11 @@ span 名为 `<tool> <package>`，例如 `compile example.com/p`；go 没有给�
 | `gocacheprog` | `cache.session` | 无 |
 | `cache get` | `cache.get.hit`、`cache.get.miss` | `gocached.cache.result`（`hit` 或 `miss`）；命中时还有 `gocached.backend`（`local` 或 `remote`）和 `gocached.size` |
 | `cache put` | `cache.put` | `gocached.kind`、`gocached.size`、`gocached.upload`（`queued`；因 `GOCACHED_SKIP_KINDS` 或此前被拒而 `skipped`；没有服务端时为 `local_only`） |
-| `cache upload` | `cache.upload` | `gocached.kind`、`gocached.size`、`gocached.upload`（`uploaded`；服务端拒绝该类型时为 `skipped`；`failed` 并带 error 状态）、`gocached.batch_size` |
+| `cache upload` | `cache.upload` | 每个上传批次一个 span：`gocached.batch_size`，以及计数 `gocached.uploaded`、`gocached.skipped`（服务端拒绝该类型，在本次请求中或对象排队期间）和 `gocached.failed`（不为 0 时带 error 状态） |
 
-除 `gocacheprog` 外，每个 span 都带有 `gocached.action_id`，即 go 用作 compile `-buildid` 第一段的 20 字符形式，因此一次未命中与随后的 compile 拥有相同的值。`GOCACHED_TRACE_SKIP` 接受逗号分隔的跳过键列表，列出的不记录，例如 `GOCACHED_TRACE_SKIP=cache.get.hit,cache.upload`；默认全部记录。go 不会缓存 prog 的 stderr，因此追踪失败只会在那里打印警告：prog 对 go 的应答和统计行都不会改变。
+`cache upload` span 对其批次中的每个对象，都有一个指向该对象 `cache put` span 的 span link，因此后端可以显示一个请求携带了哪些 put。排队期间类型被服务端拒绝的对象不会发送，但仍计入该批次，算作 skipped；只含这类对象的批次也有 span，只是没有发出请求。跳过 `cache.put` 时它没有 link。每个上传失败的对象是一个 `upload failed` span event，带有其 `gocached.action_id`、`gocached.kind`、`gocached.size` 和 `exception.message`。
+
+除 `gocacheprog` 和 `cache upload` 外，每个 span 都带有 `gocached.action_id`，即 go 用作 compile `-buildid` 第一段的 20 字符形式，因此一次未命中与随后的 compile 拥有相同的值。`GOCACHED_TRACE_SKIP` 接受逗号分隔的跳过键列表，列出的不记录，例如 `GOCACHED_TRACE_SKIP=cache.get.hit,cache.upload`；默认全部记录。go 不会缓存 prog 的 stderr，因此追踪失败只会在那里打印警告：prog 对 go 的应答和统计行都不会改变。
 
 ## 缓存条目类型
 

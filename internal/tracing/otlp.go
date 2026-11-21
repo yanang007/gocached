@@ -47,7 +47,41 @@ type otlpSpan struct {
 	StartTimeUnixNano string         `json:"startTimeUnixNano"`
 	EndTimeUnixNano   string         `json:"endTimeUnixNano"`
 	Attributes        []otlpKeyValue `json:"attributes,omitempty"`
+	Events            []otlpEvent    `json:"events,omitempty"`
+	Links             []otlpLink     `json:"links,omitempty"`
 	Status            otlpStatus     `json:"status"`
+}
+
+type otlpLink struct {
+	TraceID    string         `json:"traceId"`
+	SpanID     string         `json:"spanId"`
+	Attributes []otlpKeyValue `json:"attributes,omitempty"`
+}
+
+type otlpEvent struct {
+	TimeUnixNano string         `json:"timeUnixNano"`
+	Name         string         `json:"name"`
+	Attributes   []otlpKeyValue `json:"attributes,omitempty"`
+}
+
+func toOTLPAttrs(attrs []Attr) []otlpKeyValue {
+	var out []otlpKeyValue
+	for _, a := range attrs {
+		out = append(out, otlpKeyValue{Key: a.Key, Value: toOTLPValue(a.Value)})
+	}
+	return out
+}
+
+func fromOTLPAttrs(kvs []otlpKeyValue) ([]Attr, error) {
+	var out []Attr
+	for _, a := range kvs {
+		v, err := fromOTLPValue(a.Key, a.Value)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, Attr{Key: a.Key, Value: v})
+	}
+	return out, nil
 }
 
 type otlpKeyValue struct {
@@ -179,8 +213,12 @@ func toOTLP(s Span) otlpSpan {
 	if s.ParentSpanID.IsValid() {
 		o.ParentSpanID = s.ParentSpanID.String()
 	}
-	for _, a := range s.Attrs {
-		o.Attributes = append(o.Attributes, otlpKeyValue{Key: a.Key, Value: toOTLPValue(a.Value)})
+	o.Attributes = toOTLPAttrs(s.Attrs)
+	for _, l := range s.Links {
+		o.Links = append(o.Links, otlpLink{TraceID: l.TraceID.String(), SpanID: l.SpanID.String(), Attributes: toOTLPAttrs(l.Attrs)})
+	}
+	for _, e := range s.Events {
+		o.Events = append(o.Events, otlpEvent{TimeUnixNano: unixNano(e.Time), Name: e.Name, Attributes: toOTLPAttrs(e.Attrs)})
 	}
 	return o
 }
@@ -208,12 +246,31 @@ func fromOTLP(o otlpSpan) (Span, error) {
 	s.TraceState, s.Name = o.TraceState, o.Name
 	s.Kind = SpanKind(o.Kind)
 	s.Status = Status{Code: StatusCode(o.Status.Code), Message: o.Status.Message}
-	for _, a := range o.Attributes {
-		v, err := fromOTLPValue(a.Key, a.Value)
-		if err != nil {
+	if s.Attrs, err = fromOTLPAttrs(o.Attributes); err != nil {
+		return s, err
+	}
+	for _, ol := range o.Links {
+		var l Link
+		if l.TraceID, err = trace.TraceIDFromHex(ol.TraceID); err != nil {
+			return s, fmt.Errorf("link traceId %q: %w", ol.TraceID, err)
+		}
+		if l.SpanID, err = trace.SpanIDFromHex(ol.SpanID); err != nil {
+			return s, fmt.Errorf("link spanId %q: %w", ol.SpanID, err)
+		}
+		if l.Attrs, err = fromOTLPAttrs(ol.Attributes); err != nil {
 			return s, err
 		}
-		s.Attrs = append(s.Attrs, Attr{Key: a.Key, Value: v})
+		s.Links = append(s.Links, l)
+	}
+	for _, oe := range o.Events {
+		e := Event{Name: oe.Name}
+		if e.Time, err = fromUnixNano(oe.TimeUnixNano); err != nil {
+			return s, err
+		}
+		if e.Attrs, err = fromOTLPAttrs(oe.Attributes); err != nil {
+			return s, err
+		}
+		s.Events = append(s.Events, e)
 	}
 	return s, nil
 }

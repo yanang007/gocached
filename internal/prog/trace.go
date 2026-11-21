@@ -10,7 +10,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/yanang007/gocached/backend"
-	"github.com/yanang007/gocached/chain"
 	"github.com/yanang007/gocached/internal/kind"
 	"github.com/yanang007/gocached/internal/tracing"
 )
@@ -35,6 +34,14 @@ const (
 	sizeAttrKey     = "gocached.size"
 	uploadAttrKey   = "gocached.upload"
 	batchSizeAttr   = "gocached.batch_size"
+	uploadedAttr    = "gocached.uploaded" // upload: objects stored
+	skippedAttr     = "gocached.skipped"  // upload: objects whose kind was refused
+	failedAttr      = "gocached.failed"   // upload: objects that failed
+
+	// uploadFailedEvent is the upload span event of each failed object,
+	// with the OTel semantic convention attribute for the error.
+	uploadFailedEvent    = "upload failed"
+	exceptionMessageAttr = "exception.message"
 )
 
 // tracer collects the spans of one prog session and spools them on close.
@@ -68,18 +75,38 @@ func (t *tracer) now() time.Time {
 	return time.Now()
 }
 
+// newPutSpanID returns the span ID a put's span will have, generated when
+// the put starts so the upload span can link to it. It is invalid when put
+// spans are not recorded, so no link points to a missing span.
+func (t *tracer) newPutSpanID() trace.SpanID {
+	if t == nil || t.cfg.Skip(spanPut.skipKey) {
+		return trace.SpanID{}
+	}
+	return tracing.NewSpanID()
+}
+
 // record adds a finished child span of kind k unless its skip key is
 // skipped.
 func (t *tracer) record(k spanKind, start time.Time, actionID []byte, status tracing.Status, attrs ...tracing.Attr) {
+	t.recordID(k, trace.SpanID{}, start, actionID, status, attrs...)
+}
+
+// recordID is record with span ID id, or a new one when id is invalid.
+func (t *tracer) recordID(k spanKind, id trace.SpanID, start time.Time, actionID []byte, status tracing.Status, attrs ...tracing.Attr) {
 	if t == nil || t.cfg.Skip(k.skipKey) {
 		return
 	}
 	s := t.cfg.NewSpan(t.ctx, k.name)
+	if id.IsValid() {
+		s.SpanID = id
+	}
 	s.Start, s.End = start, time.Now()
-	var id [32]byte
-	copy(id[:], actionID)
-	s.Attrs = tracing.MergeAttrs(s.Attrs, append([]tracing.Attr{{Key: tracing.ActionIDAttr, Value: tracing.String(tracing.ActionIDString(id))}}, attrs...)...)
+	s.Attrs = tracing.MergeAttrs(s.Attrs, append([]tracing.Attr{actionIDAttr(actionID)}, attrs...)...)
 	s.Status = status
+	t.add(s)
+}
+
+func (t *tracer) add(s tracing.Span) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if !t.flushed {
@@ -87,23 +114,58 @@ func (t *tracer) record(k spanKind, start time.Time, actionID []byte, status tra
 	}
 }
 
-// recordUpload adds the span of one object's upload, sent in a batch of
-// batchLen objects that started at start: uploaded, skipped (the backend
-// refused its kind) or failed.
-func (t *tracer) recordUpload(start time.Time, st chain.Stored, batchLen int, err error) {
-	if t == nil {
+func actionIDAttr(actionID []byte) tracing.Attr {
+	var id [32]byte
+	copy(id[:], actionID)
+	return tracing.Attr{Key: tracing.ActionIDAttr, Value: tracing.String(tracing.ActionIDString(id))}
+}
+
+// recordUpload adds the span of one upload batch that started at start.
+// It sent sent, whose items ended with errs: nil when uploaded, a
+// *backend.RejectedError when skipped (the backend refused the kind), else
+// failed. Items of dropped were not sent because their kind was refused
+// while they were queued; they count as skipped. The span links to the put
+// span of every item and has an event per failed item.
+func (t *tracer) recordUpload(start time.Time, sent []queued, errs []error, dropped []queued) {
+	if t == nil || t.cfg.Skip(spanUpload.skipKey) {
 		return
 	}
-	result, status := "uploaded", tracing.Status{}
-	var rej *backend.RejectedError
-	switch {
-	case errors.As(err, &rej):
-		result = "skipped"
-	case err != nil:
-		result, status = "failed", tracing.Status{Code: tracing.StatusError, Message: err.Error()}
+	s := t.cfg.NewSpan(t.ctx, spanUpload.name)
+	s.Start, s.End = start, time.Now()
+	skipped := int64(len(dropped))
+	for _, q := range dropped {
+		if q.putSpan.IsValid() {
+			s.Links = append(s.Links, tracing.Link{TraceID: s.TraceID, SpanID: q.putSpan})
+		}
 	}
-	t.record(spanUpload, start, st.ActionID, status, kindAttr(st.Object.Kind), sizeAttr(st.Object.Size), uploadAttr(result),
-		tracing.Attr{Key: batchSizeAttr, Value: tracing.Int(int64(batchLen))})
+	var uploaded, failed int64
+	for i, q := range sent {
+		if q.putSpan.IsValid() {
+			s.Links = append(s.Links, tracing.Link{TraceID: s.TraceID, SpanID: q.putSpan})
+		}
+		var rej *backend.RejectedError
+		switch err := errs[i]; {
+		case err == nil:
+			uploaded++
+		case errors.As(err, &rej):
+			skipped++
+		default:
+			failed++
+			if s.Status.Code != tracing.StatusError {
+				s.Status = tracing.Status{Code: tracing.StatusError, Message: err.Error()}
+			}
+			s.Events = append(s.Events, tracing.Event{Time: s.End, Name: uploadFailedEvent, Attrs: []tracing.Attr{
+				actionIDAttr(q.ActionID), kindAttr(q.Object.Kind), sizeAttr(q.Object.Size),
+				{Key: exceptionMessageAttr, Value: tracing.String(err.Error())},
+			}})
+		}
+	}
+	s.Attrs = tracing.MergeAttrs(s.Attrs,
+		tracing.Attr{Key: batchSizeAttr, Value: tracing.Int(int64(len(sent) + len(dropped)))},
+		tracing.Attr{Key: uploadedAttr, Value: tracing.Int(uploaded)},
+		tracing.Attr{Key: skippedAttr, Value: tracing.Int(skipped)},
+		tracing.Attr{Key: failedAttr, Value: tracing.Int(failed)})
+	t.add(s)
 }
 
 func kindAttr(k kind.Kind) tracing.Attr {
