@@ -17,7 +17,7 @@ pipeline            (server span, opened and closed by the last job)
 
 ## 各任务如何配合
 
-- **普通任务**用 `trace begin --key "$PIPELINE_KEY" --no-record` 计算流水线的 traceparent，这一步不写入任何内容。任务自己的 span 使用该任务自己的 `GOCACHED_TRACE_KEY`（任务 ID），并成为流水线 span 的子 span。每个任务最外层的 `trace go` 或 `trace exec` 结束时导出它的 span。
+- **普通任务**用 `trace begin --key "$PIPELINE_KEY" --no-record` 计算流水线的 traceparent，这一步不写入任何内容。任务自己的 span 使用该任务自己的 `GOCACHED_TRACE_KEY`（任务 ID），并成为流水线 span 的子 span。每个任务最外层的 `trace exec` 结束时导出它的 span。
 - **收尾任务**在其他任务之后运行，无论它们成功还是失败。它用 `trace begin -k server -n pipeline --key "$PIPELINE_KEY"` 开启流水线 span，再用 `trace end --export` 关闭并导出。`--start` 把 span 的开始时间设为流水线的创建时间，因此流水线 span 虽然在最后才记录，却覆盖整条流水线。
 - `trace end` 运行时 `GOCACHED_TRACE_KEY` 要设为流水线 key，因为 span 在 `--key` 对应的会话目录中结束。在同一个任务中开启和关闭，两者就在同一个目录里。
 
@@ -47,7 +47,7 @@ build:
     GOCACHED_TRACE_KEY: $CI_JOB_ID
   script:
     - export TRACEPARENT=$(gocached trace begin -n pipeline --key "$PIPELINE_KEY" --no-record)
-    - gocached trace go -n build -- build ./...
+    - gocached trace exec --go -n build -- go build ./...
 
 lint:
   stage: lint
@@ -95,7 +95,7 @@ jobs:
       - run: curl -fsSL https://github.com/yanang007/gocached/releases/latest/download/install.sh | sh
       - run: |
           export TRACEPARENT=$(gocached trace begin -n pipeline --key "$PIPELINE_KEY" --no-record)
-          gocached trace go -n build -- build ./...
+          gocached trace exec --go -n build -- go build ./...
 
   lint:
     runs-on: ubuntu-latest

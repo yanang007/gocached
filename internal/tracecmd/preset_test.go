@@ -1,6 +1,8 @@
 package tracecmd_test
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -45,7 +47,7 @@ func TestGoEnvLeavesEveryPresetVariableThatIsAlreadySetEvenEmpty(t *testing.T) {
 		for _, val := range []string{"", "mine"} {
 			env, _ := tracecmd.GoEnv([]string{key + "=" + val}, "/opt/gocached", "/c")
 			if got := envMap(env)[key]; got != val {
-				t.Errorf("with %s=%q set, trace go made it %q", key, val, got)
+				t.Errorf("with %s=%q set, the go preset made it %q", key, val, got)
 			}
 		}
 	}
@@ -142,5 +144,81 @@ func TestGoEnvQuotesPathsWithQuotesAsGoSplitsThem(t *testing.T) {
 		if (c.gocacheprog == "" || c.goflags == "") && !strings.Contains(strings.Join(notes, "\n"), "quote") {
 			t.Errorf("%s: notes %q, want a warning about quotes", c.self, notes)
 		}
+	}
+}
+
+// execEnv runs `trace exec args... -- <child that prints keys>` with env and
+// returns its exit code, stdout and stderr.
+func execEnv(t *testing.T, env []string, args []string, keys ...string) (int, string, string) {
+	t.Helper()
+	var out, errb strings.Builder
+	argv := append(append([]string{"exec"}, args...), "--", self(t))
+	env = append(env, "GOCACHED_TRACE_BASE_DIR="+t.TempDir(), childEnv+"=env:"+strings.Join(keys, ","))
+	code := tracecmd.Run(argv, tracecmd.Options{Environ: env, Stdout: &out, Stderr: &errb})
+	return code, out.String(), errb.String()
+}
+
+// presetKeys are variables only the go preset sets.
+var presetKeys = []string{"GOCACHED_TRACE", "GOCACHEPROG", "GOCACHED_TRACE_RUSAGE", "GOFLAGS"}
+
+func goEnviron(t *testing.T) []string {
+	// go env GOCACHE needs go on PATH and a home to resolve the default cache.
+	var env []string
+	for _, k := range []string{"PATH", "Path", "HOME", "USERPROFILE", "LOCALAPPDATA", "SystemRoot", "GOROOT"} {
+		if v, ok := os.LookupEnv(k); ok {
+			env = append(env, k+"="+v)
+		}
+	}
+	return append(env, "GOCACHED_TRACE_FILE="+filepath.Join(t.TempDir(), "trace.jsonl"))
+}
+
+func TestExecWithoutAPresetSetsNoPresetVariableAndPrintsNoNotes(t *testing.T) {
+	code, out, errOut := execEnv(t, goEnviron(t), nil, presetKeys...)
+	if code != 0 {
+		t.Fatalf("exit code %d, stderr %s", code, errOut)
+	}
+	for _, k := range presetKeys {
+		if !strings.Contains(out, k+" unset") {
+			t.Errorf("command saw %s set:\n%s", k, out)
+		}
+	}
+	if strings.Contains(errOut, "trace exec:") {
+		t.Errorf("stderr %q, want no notes", errOut)
+	}
+}
+
+func TestExecGoPresetReachesAnyCommandThroughItsEnvironment(t *testing.T) {
+	for _, args := range [][]string{
+		{"--go"},
+		{"--preset", "go"},
+		{"--preset=go,go"},
+		{"--preset", "go", "--go"},
+	} {
+		code, out, errOut := execEnv(t, goEnviron(t), args, presetKeys...)
+		if code != 0 {
+			t.Fatalf("%v: exit code %d, stderr %s", args, code, errOut)
+		}
+		for _, want := range []string{"GOCACHED_TRACE=1\n", "GOCACHED_TRACE_RUSAGE=1\n", " prog\n", "toolexec'\n"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("%v: command environment lacks %q:\n%s", args, want, out)
+			}
+		}
+	}
+}
+
+func TestExecGoFalseLeavesThePresetOff(t *testing.T) {
+	_, out, _ := execEnv(t, goEnviron(t), []string{"--go=false"}, "GOCACHED_TRACE")
+	if !strings.Contains(out, "GOCACHED_TRACE unset") {
+		t.Errorf("--go=false set the preset:\n%s", out)
+	}
+}
+
+func TestExecRejectsAnUnknownPresetNamingTheKnownOnes(t *testing.T) {
+	code, out, errOut := execEnv(t, goEnviron(t), []string{"--preset", "go,make"}, "GOCACHED_TRACE")
+	if code != 2 || out != "" {
+		t.Errorf("exit code %d, stdout %q; want 2 and the command not run", code, out)
+	}
+	if !strings.Contains(errOut, `unknown preset "make"`) || !strings.Contains(errOut, "known: go") {
+		t.Errorf("stderr %q, want the unknown and the known presets", errOut)
 	}
 }

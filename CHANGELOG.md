@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `trace exec --preset name[,name]` (repeatable) and its shorthand `--go` put a preset in the command's environment, so the go commands of any command (sh, make, ...) inherit it. The `go` preset sets what `trace go` set.
+
+### Removed
+
+- **Breaking:** `gocached trace go`. Use `gocached trace exec --go -- go <go args>`.
+
 ## [0.6.0] - 2026-11-21
 
 ### Added

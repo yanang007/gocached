@@ -2,7 +2,7 @@
 
 # 构建追踪：单任务
 
-一个 CI 任务在同一个 trace 下运行 `go build ./...` 和 `staticcheck ./...`。`gocached trace go` 运行构建，并预设好 `GOCACHEPROG`、toolexec 和资源用量统计；`gocached trace exec` 运行 staticcheck。每次编译、缓存查询和缓存写入都会成为一个 span。
+一个 CI 任务在同一个 trace 下运行 `go build ./...` 和 `staticcheck ./...`。`gocached trace exec --go` 运行这两条命令，并在它们的环境中预设好 `GOCACHEPROG`、toolexec 和资源用量统计，它们启动的每个 go 命令都会继承。每次编译、缓存查询和缓存写入都会成为一个 span。
 
 命令、变量和属性的说明见 README 的[构建追踪](../../../../README.zh-CN.md#构建追踪)一节。
 
@@ -23,15 +23,12 @@ export GOCACHED_TRACE_KEY="${GOCACHED_TRACE_KEY:-local}"
 export TRACEPARENT=$(gocached trace begin -n ci -a vcs.ref="${GIT_REF:-local}")
 
 # 运行 go build，预设 GOCACHEPROG、toolexec 和资源用量统计。
-gocached trace go -n build -- build ./...
+gocached trace exec --go -n build -- go build ./...
 status=$?
 
-# trace go 的预设只作用于它运行的 go。staticcheck 会运行 `go list -export`，
-# 后者从环境中读取 GOCACHEPROG 和 GOFLAGS，所以这里给它同样的设置。
+# 预设在 staticcheck 的环境中，所以它的 `go list -export` 也会被追踪。
 if [ "$status" -eq 0 ]; then
-  GOCACHED_TRACE=1 GOCACHED_SHARE=1 GOCACHED_TRACE_RUSAGE=1 \
-  GOCACHEPROG="gocached prog" GOFLAGS="'-toolexec=gocached toolexec'" \
-    gocached trace exec -n staticcheck -- staticcheck ./...
+  gocached trace exec --go -- staticcheck ./...
   status=$?
 fi
 
@@ -41,10 +38,9 @@ exit "$status"
 
 说明：
 
-- `trace begin` 开启 `ci` span，`trace end --export` 关闭它并导出整个会话。`trace go` 和 `trace exec` 在它内部运行，因此不会各自导出。
+- `trace begin` 开启 `ci` span，`trace end --export` 关闭它并导出整个会话。两次 `trace exec` 都在它内部运行，因此不会各自导出。
 - 构建或 staticcheck 失败时，`trace end --exit-code` 会把 `ci` span 的状态设为错误。
-- `trace go` 的预设只写入它所运行的 `go` 的环境。之后调用 `go` 的工具需要显式设置同样的变量。`GOFLAGS` 中的单引号让 `-toolexec=gocached toolexec` 保持为一个 flag；去掉引号，go 会报错 `parsing $GOFLAGS: non-flag "toolexec"` 并退出。
-- `GOCACHED_SHARE=1` 与 `trace go` 的设置一致，staticcheck 因此和构建使用同一个本地缓存目录（主机的 `GOCACHE`）。若想改用私有缓存目录，就为整个脚本设置 `GOCACHED_DIR`；这时 `trace go` 不会设置 `GOCACHED_SHARE`，这里也可以去掉它。
+- `--go` 会设置 `GOCACHED_SHARE=1`，所以两次运行都以主机的 `GOCACHE` 作为本地缓存目录。若想改用私有缓存目录，就为整个脚本设置 `GOCACHED_DIR`。
 - 设置 `GOCACHED_URL`（以及 `GOCACHED_TOKEN`）即可通过 `gocached serve` 在多个 runner 之间共享缓存。下面的运行没有服务端，所以所有命中都是本地命中。
 
 ## 一次真实运行

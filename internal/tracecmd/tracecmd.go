@@ -1,4 +1,4 @@
-// Package tracecmd implements `gocached trace begin|end|set|export|exec|go` (ADR
+// Package tracecmd implements `gocached trace begin|end|set|export|exec` (ADR
 // 0007). Usage errors (bad flags, unknown command) exit 2. Otherwise every
 // command fails open: it warns on stderr and exits 0 on its own errors
 // (exec exits with its command's code), and begin and end print the
@@ -26,7 +26,7 @@ type Options struct {
 	Stdout, Stderr io.Writer
 }
 
-const usage = "usage: gocached trace begin [-n name] [-s service] [-k kind] [-a k=v]... [--key K] [--start T] [--no-record] | end [-a k=v]... [--exit-code N] [--status ok|error] [-m message] [--export] | set -a k=v... | export [--all] | exec [-n name] [-s service] [-k kind] [-a k=v]... -- cmd [args...] | go [-n name] [-s service] [-k kind] [-a k=v]... -- [go args...]"
+const usage = "usage: gocached trace begin [-n name] [-s service] [-k kind] [-a k=v]... [--key K] [--start T] [--no-record] | end [-a k=v]... [--exit-code N] [--status ok|error] [-m message] [--export] | set -a k=v... | export [--all] | exec [--go] [--preset name[,name]]... [-n name] [-s service] [-k kind] [-a k=v]... -- cmd [args...]"
 
 // Run runs `gocached trace args...` and returns its exit code. A usage
 // error (bad flags, unknown command) is misuse and exits 2. Runtime errors
@@ -48,8 +48,6 @@ func Run(args []string, opts Options) int {
 		return export(args[1:], opts)
 	case "exec":
 		return execCmd(args[1:], opts)
-	case "go":
-		return goCmd(args[1:], opts)
 	default:
 		fmt.Fprintf(opts.Stderr, "gocached trace: unknown command %q\n%s\n", args[0], usage)
 		return 2

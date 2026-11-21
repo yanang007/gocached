@@ -28,7 +28,7 @@ func withoutEnv(keys ...string) []string {
 	return env
 }
 
-func TestTraceGoTracesAFreshBuildIntoTheDefaultFile(t *testing.T) {
+func TestExecGoPresetTracesAGoBuildBelowAnyCommandIntoTheDefaultFile(t *testing.T) {
 	fixture, err := filepath.Abs(filepath.Join("testdata", "fixture"))
 	if err != nil {
 		t.Fatal(err)
@@ -47,7 +47,10 @@ func TestTraceGoTracesAFreshBuildIntoTheDefaultFile(t *testing.T) {
 	}
 
 	work := t.TempDir()
-	cmd := exec.Command(bin, "trace", "go", "-n", "build", "--", "-C", fixture, "build", "-o", filepath.Join(t.TempDir(), "out"), ".")
+	// The nested trace exec, which knows no preset, stands for sh or make:
+	// go must get the preset through the environment alone.
+	cmd := exec.Command(bin, "trace", "exec", "--go", "-n", "build", "--",
+		bin, "trace", "exec", "-n", "make", "--", "go", "-C", fixture, "build", "-o", filepath.Join(t.TempDir(), "out"), ".")
 	cmd.Dir = work
 	cmd.Env = append(withoutEnv("GOCACHEPROG", "GOFLAGS", "GOCACHED_TRACE", "GOCACHED_SHARE", "GOCACHED_DIR",
 		"GOCACHED_TRACE_RUSAGE", "GOCACHED_TRACE_FILE", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
@@ -56,7 +59,7 @@ func TestTraceGoTracesAFreshBuildIntoTheDefaultFile(t *testing.T) {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("trace go: %v\n%s", err, stderr.String())
+		t.Fatalf("trace exec --go: %v\n%s", err, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "gocached-trace.jsonl") {
 		t.Errorf("stderr does not name the default trace file:\n%s", stderr.String())
@@ -72,6 +75,15 @@ func TestTraceGoTracesAFreshBuildIntoTheDefaultFile(t *testing.T) {
 	if root.TraceID == "" {
 		t.Fatalf("no build span among %d spans", len(spans))
 	}
+	var mid exportedSpan
+	for _, s := range spans {
+		if s.Name == "make" {
+			mid = s
+		}
+	}
+	if mid.ParentSpanID != root.SpanID {
+		t.Errorf("make span parent %q, want the build span %q", mid.ParentSpanID, root.SpanID)
+	}
 	seen := map[string]bool{}
 	for _, s := range spans {
 		if s.TraceID != root.TraceID {
@@ -82,6 +94,9 @@ func TestTraceGoTracesAFreshBuildIntoTheDefaultFile(t *testing.T) {
 			seen["tool"] = true
 		case s.Name == "gocacheprog":
 			seen["prog"] = true
+			if s.ParentSpanID != mid.SpanID {
+				t.Errorf("gocacheprog parent %q, want the make span %q", s.ParentSpanID, mid.SpanID)
+			}
 		case s.Name == "cache put":
 			seen["cache"] = true
 		}
