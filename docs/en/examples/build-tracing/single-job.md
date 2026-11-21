@@ -2,7 +2,7 @@ English | [简体中文](../../../zh-CN/examples/build-tracing/single-job.md)
 
 # Build tracing: single job
 
-One CI job runs `go build ./...` and `staticcheck ./...` under one trace. `gocached trace go` runs the build with `GOCACHEPROG`, toolexec and resource usage preset, and `gocached trace exec` runs staticcheck. Each compile, cache lookup and cache store becomes a span.
+One CI job runs `go build ./...` and `staticcheck ./...` under one trace. `gocached trace exec --go` runs both with `GOCACHEPROG`, toolexec and resource usage preset in their environment, which reaches every go command they start. Each compile, cache lookup and cache store becomes a span.
 
 Commands, variables and attributes are described in the [Build tracing](../../../../README.md#build-tracing) section of the README.
 
@@ -23,15 +23,12 @@ export GOCACHED_TRACE_KEY="${GOCACHED_TRACE_KEY:-local}"
 export TRACEPARENT=$(gocached trace begin -n ci -a vcs.ref="${GIT_REF:-local}")
 
 # go build with GOCACHEPROG, toolexec and resource usage preset.
-gocached trace go -n build -- build ./...
+gocached trace exec --go -n build -- go build ./...
 status=$?
 
-# trace go sets its preset only for go itself. staticcheck runs `go list -export`,
-# which reads GOCACHEPROG and GOFLAGS from the environment, so give it the same.
+# The preset is in staticcheck's environment, so its `go list -export` is traced too.
 if [ "$status" -eq 0 ]; then
-  GOCACHED_TRACE=1 GOCACHED_SHARE=1 GOCACHED_TRACE_RUSAGE=1 \
-  GOCACHEPROG="gocached prog" GOFLAGS="'-toolexec=gocached toolexec'" \
-    gocached trace exec -n staticcheck -- staticcheck ./...
+  gocached trace exec --go -- staticcheck ./...
   status=$?
 fi
 
@@ -41,10 +38,9 @@ exit "$status"
 
 Notes:
 
-- `trace begin` opens the `ci` span, and `trace end --export` closes it and exports the whole session. `trace go` and `trace exec` run inside it, so they do not export on their own.
+- `trace begin` opens the `ci` span, and `trace end --export` closes it and exports the whole session. Both `trace exec` calls run inside it, so they do not export on their own.
 - `trace end --exit-code` gives the `ci` span status error when the build or staticcheck failed.
-- `trace go` sets its preset only in the environment of the `go` it runs. A later tool that calls `go` gets the same variables explicitly. The single quotes in `GOFLAGS` keep `-toolexec=gocached toolexec` as one flag; without them go stops with `parsing $GOFLAGS: non-flag "toolexec"`.
-- `GOCACHED_SHARE=1` matches what `trace go` sets, so the staticcheck run uses the same local cache dir (the host `GOCACHE`) as the build. To use a private cache dir instead, set `GOCACHED_DIR` for the whole script; then `trace go` does not set `GOCACHED_SHARE`, and you can drop it here too.
+- `--go` sets `GOCACHED_SHARE=1`, so both runs use the host `GOCACHE` as their local cache dir. To use a private cache dir instead, set `GOCACHED_DIR` for the whole script.
 - Set `GOCACHED_URL` (and `GOCACHED_TOKEN`) to share the cache across runners through `gocached serve`. The run below had no server, so every hit is local.
 
 ## A real run

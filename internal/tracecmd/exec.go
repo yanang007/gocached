@@ -19,14 +19,17 @@ const (
 	exitSignal    = 128 // plus the signal number, as in sh
 )
 
-// execCmd runs `trace exec [-n name] [-s service] [-a k=v]... -- cmd args`:
-// Begin a span, run cmd with TRACEPARENT set to it, then End it with the
-// exit code, exporting the session when it was the outermost span. It
-// returns cmd's exit code; tracing errors only warn.
+// execCmd runs `trace exec [--go] [--preset names]... [-n name] [-s service]
+// [-a k=v]... -- cmd args`: Begin a span, run cmd with TRACEPARENT set to it
+// and the environment of each enabled preset, then End it with the exit
+// code, exporting the session when it was the outermost span. It returns
+// cmd's exit code; tracing errors only warn.
 func execCmd(args []string, opts Options) int {
 	fs := newFlagSet("trace exec", opts)
 	var sf SpanFlags
 	sf.Register(fs, "")
+	enabled := map[string]bool{}
+	registerPresets(fs, enabled)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -37,6 +40,13 @@ func execCmd(args []string, opts Options) int {
 	}
 	if sf.Name == "" {
 		sf.Name = argv[0]
+	}
+	if enabled[presetGo] {
+		env, ok := applyGoPreset(opts.Environ, opts.Stderr)
+		if !ok {
+			return exitCannotRun
+		}
+		opts.Environ = env
 	}
 	return execSpan(argv, sf, opts)
 }

@@ -5,8 +5,8 @@
 //	gocached toolexec  -toolexec wrapper that runs each tool unchanged
 //	                 (set GOFLAGS="'-toolexec=gocached toolexec'")
 //	gocached trace   begin, end and export build trace spans, or exec a
-//	                 command in one (ADR 0007); `trace go` runs go with
-//	                 tracing, GOCACHEPROG and toolexec preset
+//	                 command in one (ADR 0007); `trace exec --go` presets
+//	                 tracing, GOCACHEPROG and toolexec for its go commands
 //
 // Environment for trace (usage errors exit 2; on runtime errors begin, end
 // and export warn and exit 0, and exec exits with its command; see README):

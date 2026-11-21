@@ -14,8 +14,8 @@ import (
 
 // exportedSpan is the part of an OTLP JSON span these tests check.
 type exportedSpan struct {
-	Name, TraceID, ParentSpanID string
-	Attrs                       map[string]string
+	Name, TraceID, SpanID, ParentSpanID string
+	Attrs                               map[string]string
 }
 
 // readExported decodes every OTLP JSON document appended to file.
@@ -35,6 +35,7 @@ func readExported(t *testing.T, file string) []exportedSpan {
 					Spans []struct {
 						Name         string `json:"name"`
 						TraceID      string `json:"traceId"`
+						SpanID       string `json:"spanId"`
 						ParentSpanID string `json:"parentSpanId"`
 						Attributes   []struct {
 							Key   string `json:"key"`
@@ -55,7 +56,7 @@ func readExported(t *testing.T, file string) []exportedSpan {
 		for _, rs := range req.ResourceSpans {
 			for _, ss := range rs.ScopeSpans {
 				for _, s := range ss.Spans {
-					e := exportedSpan{Name: s.Name, TraceID: s.TraceID, ParentSpanID: s.ParentSpanID, Attrs: map[string]string{}}
+					e := exportedSpan{Name: s.Name, TraceID: s.TraceID, SpanID: s.SpanID, ParentSpanID: s.ParentSpanID, Attrs: map[string]string{}}
 					for _, a := range s.Attributes {
 						e.Attrs[a.Key] = a.Value.StringValue + a.Value.IntValue
 					}

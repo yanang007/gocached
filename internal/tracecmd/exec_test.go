@@ -21,8 +21,18 @@ const childEnv = "GOCACHED_TRACECMD_TEST_CHILD"
 //	exit:N  print TRACEPARENT and exit with N
 //	sleep   print TRACEPARENT and sleep until killed
 //	trace   run `gocached trace <args>`, e.g. a nested exec
+//	env:K,...  print K=value, or K unset, for each key
 func TestMain(m *testing.M) {
 	switch mode := os.Getenv(childEnv); {
+	case strings.HasPrefix(mode, "env:"):
+		for k := range strings.SplitSeq(strings.TrimPrefix(mode, "env:"), ",") {
+			if v, ok := os.LookupEnv(k); ok {
+				fmt.Println(k + "=" + v)
+			} else {
+				fmt.Println(k + " unset")
+			}
+		}
+		os.Exit(0)
 	case strings.HasPrefix(mode, "exit:"):
 		fmt.Println(os.Getenv("TRACEPARENT"))
 		code, _ := strconv.Atoi(strings.TrimPrefix(mode, "exit:"))

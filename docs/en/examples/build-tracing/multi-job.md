@@ -17,7 +17,7 @@ Commands and variables are described in the [Build tracing](../../../../README.m
 
 ## How the jobs fit together
 
-- **Normal jobs** compute the pipeline traceparent with `trace begin --key "$PIPELINE_KEY" --no-record`, which writes nothing. Their own spans use the job's own `GOCACHED_TRACE_KEY` (the job ID) and become children of the pipeline span. Each job's outermost `trace go` or `trace exec` exports its spans when it ends.
+- **Normal jobs** compute the pipeline traceparent with `trace begin --key "$PIPELINE_KEY" --no-record`, which writes nothing. Their own spans use the job's own `GOCACHED_TRACE_KEY` (the job ID) and become children of the pipeline span. Each job's outermost `trace exec` exports its spans when it ends.
 - **The closing job** runs after the others, whether they passed or failed. It opens the pipeline span with `trace begin -k server -n pipeline --key "$PIPELINE_KEY"`, and closes and exports it with `trace end --export`. `--start` sets the span's start to the pipeline's creation time, so the pipeline span covers the whole pipeline although it is recorded at the end.
 - `trace end` runs with `GOCACHED_TRACE_KEY` set to the pipeline key, because the span ends in the session directory of `--key`. Opening and closing in the same job keeps both in one directory.
 
@@ -47,7 +47,7 @@ build:
     GOCACHED_TRACE_KEY: $CI_JOB_ID
   script:
     - export TRACEPARENT=$(gocached trace begin -n pipeline --key "$PIPELINE_KEY" --no-record)
-    - gocached trace go -n build -- build ./...
+    - gocached trace exec --go -n build -- go build ./...
 
 lint:
   stage: lint
@@ -94,7 +94,7 @@ jobs:
       - run: curl -fsSL https://github.com/yanang007/gocached/releases/latest/download/install.sh | sh
       - run: |
           export TRACEPARENT=$(gocached trace begin -n pipeline --key "$PIPELINE_KEY" --no-record)
-          gocached trace go -n build -- build ./...
+          gocached trace exec --go -n build -- go build ./...
 
   lint:
     runs-on: ubuntu-latest

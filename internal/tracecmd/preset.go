@@ -1,42 +1,72 @@
 package tracecmd
 
 import (
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/yanang007/gocached/internal/envx"
 )
 
-// goCmd runs `trace go [-n name] [-s service] [-k kind] [-a k=v]... -- go
-// args`: `trace exec` of go with the variables of GoEnv preset, so one
-// command traces a build's tools, its GOCACHEPROG and its cache. Running it
-// is the user's opt-in to toolexec in GOFLAGS (ADR 0006) and to shared mode
-// (ADR 0003).
-func goCmd(args []string, opts Options) int {
-	fs := newFlagSet("trace go", opts)
-	var sf SpanFlags
-	sf.Register(fs, "go")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
+// presetGo is the name of the go preset: build tracing for every go
+// command the traced command runs, through its environment (GoEnv).
+const presetGo = "go"
+
+// presets lists the known preset names, in the order they are applied.
+var presets = []string{presetGo}
+
+// registerPresets adds --preset (repeatable, comma-separated, as pflag's
+// StringSlice) and its shorthand --go to fs, collecting names into set.
+func registerPresets(fs *flag.FlagSet, set map[string]bool) {
+	fs.Func("preset", "enable preset `names`, comma-separated and repeatable: "+strings.Join(presets, ", "), func(s string) error {
+		for n := range strings.SplitSeq(s, ",") {
+			n = strings.TrimSpace(n)
+			if !slices.Contains(presets, n) {
+				return fmt.Errorf("unknown preset %q (known: %s)", n, strings.Join(presets, ", "))
+			}
+			set[n] = true
+		}
+		return nil
+	})
+	fs.BoolFunc("go", "shorthand for --preset go", func(s string) error {
+		on, err := strconv.ParseBool(s)
+		if err != nil {
+			return err
+		}
+		if on {
+			set[presetGo] = true
+		} else {
+			delete(set, presetGo)
+		}
+		return nil
+	})
+}
+
+// applyGoPreset returns environ with the go preset applied for the running
+// gocached binary, printing its notes on stderr. Enabling it is the user's
+// opt-in to toolexec in GOFLAGS (ADR 0006) and to shared mode (ADR 0003).
+// It returns false when the gocached path is unknown.
+func applyGoPreset(environ []string, stderr io.Writer) ([]string, bool) {
 	self, err := os.Executable()
 	if err != nil {
-		fmt.Fprintf(opts.Stderr, "gocached trace go: %v\n", err)
-		return exitCannotRun
+		fmt.Fprintf(stderr, "gocached trace exec: %v\n", err)
+		return nil, false
 	}
-	gocache, err := goEnvGOCACHE(opts.Environ)
+	gocache, err := goEnvGOCACHE(environ)
 	if err != nil {
-		// go itself will report why it cannot run.
-		warn(opts.Stderr, "go", fmt.Errorf("go env GOCACHE: %w", err))
+		// A go deeper in the command may still run; set everything.
+		warn(stderr, "exec", fmt.Errorf("go env GOCACHE: %w", err))
 	}
-	env, notes := GoEnv(opts.Environ, self, gocache)
+	env, notes := GoEnv(environ, self, gocache)
 	for _, n := range notes {
-		fmt.Fprintf(opts.Stderr, "gocached trace go: %s\n", n)
+		fmt.Fprintf(stderr, "gocached trace exec: %s\n", n)
 	}
-	opts.Environ = env
-	return execSpan(append([]string{"go"}, fs.Args()...), sf, opts)
+	return env, true
 }
 
 // goEnvGOCACHE runs `go env GOCACHE` in environ.
@@ -47,8 +77,8 @@ func goEnvGOCACHE(environ []string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
-// GoEnv returns environ with the variables `trace go` presets for a go
-// command run by the gocached binary at self, with gocache the output of
+// GoEnv returns environ with the variables of the go preset for go
+// commands run by the gocached binary at self, with gocache the output of
 // `go env GOCACHE`, and the notes to print on stderr. A variable is set
 // only when it is absent from environ; set but empty counts as set.
 func GoEnv(environ []string, self, gocache string) (env, notes []string) {
@@ -140,7 +170,7 @@ func splitQuoted(s string) []string {
 	}
 }
 
-// defaultTraceFile is where `trace go` exports without a configured exporter.
+// defaultTraceFile is where the go preset exports without a configured exporter.
 const defaultTraceFile = "gocached-trace.jsonl"
 
 // quoteField quotes s for cmd/internal/quoted.Split, so that GOCACHEPROG,
